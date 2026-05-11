@@ -1,3 +1,5 @@
 flask
 gunicorn
-requests
+werkzeug
+flask-mail
+authlib
