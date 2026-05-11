@@ -16,6 +16,7 @@ DATA_FOLDER = "data"
 
 USERS_FILE = os.path.join(DATA_FOLDER, "users.json.gz")
 DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json.gz")
+FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json.gz")
 SECRET_FILE = os.path.join(DATA_FOLDER, "secret_key.txt")
 
 MAX_FILE_SIZE = 1024 * 1024 * 1024
@@ -58,8 +59,7 @@ CREDITS = {
         "DJ RDC",
         "DJ SABA 7",
         "DJ RE7 013",
-        "RSFI",
-        "DJ RDC"
+        "RSFI"
     ],
     "WEBSITE MADE BY": [
         "DJ SABA 7"
@@ -97,6 +97,14 @@ def load_discussions():
 
 def save_discussions(data):
     save_json_gz(DISCUSSION_FILE, data)
+
+
+def load_files_meta():
+    return load_json_gz(FILES_META_FILE, {})
+
+
+def save_files_meta(data):
+    save_json_gz(FILES_META_FILE, data)
 
 
 def current_user():
@@ -157,6 +165,14 @@ def update_author_name(old_email, new_username):
 
     save_discussions(discussions)
 
+    meta = load_files_meta()
+
+    for filename, data in meta.items():
+        if data.get("owner_email") == old_email:
+            data["owner"] = new_username
+
+    save_files_meta(meta)
+
 
 def allowed_file(filename):
     ext = os.path.splitext(filename.lower())[1]
@@ -187,6 +203,22 @@ def file_size_text(filename):
         return f"{size / (1024 * 1024):.1f} MB"
 
     return f"{size / 1024:.1f} KB"
+
+
+def get_file_info(files):
+    meta = load_files_meta()
+    result = {}
+
+    for file in files:
+        data = meta.get(file, {})
+        result[file] = {
+            "size": file_size_text(file),
+            "owner": data.get("owner", "unknown"),
+            "owner_email": data.get("owner_email", ""),
+            "uploaded": data.get("uploaded", 0)
+        }
+
+    return result
 
 
 def login_required(func):
@@ -241,15 +273,12 @@ HTML = """
     --white:#ffffff;
     --text:#f8fbff;
     --muted:rgba(255,255,255,.68);
-    --soft:rgba(255,255,255,.42);
     --blue:#9fe7ff;
-    --blue2:#3ebcff;
     --dark:#06101d;
     --panel:rgba(3,10,18,.78);
-    --panel2:rgba(0,0,0,.30);
-    --panel3:rgba(255,255,255,.055);
     --line:rgba(255,255,255,.24);
     --thin:rgba(255,255,255,.12);
+    --danger:#ff5c5c;
 }
 
 body{
@@ -328,17 +357,6 @@ body::after{
     right:0;
     height:1px;
     background:linear-gradient(90deg, transparent, rgba(159,231,255,.8), transparent);
-}
-
-.login-shell::after{
-    content:"";
-    position:absolute;
-    left:22px;
-    top:22px;
-    right:22px;
-    bottom:22px;
-    border:1px solid rgba(255,255,255,.06);
-    pointer-events:none;
 }
 
 .login-inner{
@@ -802,8 +820,7 @@ textarea{
 }
 
 .file-link,
-.topic-open,
-.fake-link{
+.topic-open{
     color:var(--blue);
     text-decoration:none;
     font-size:13px;
@@ -814,8 +831,7 @@ textarea{
 }
 
 .file-link:hover,
-.topic-open:hover,
-.fake-link:hover{
+.topic-open:hover{
     color:white;
     padding-left:4px;
 }
@@ -862,6 +878,27 @@ button:hover,
 .primary-btn:hover{
     background:#e9f8ff;
     color:#000;
+}
+
+.delete-btn{
+    background:rgba(70,0,0,.35);
+    color:#ffdede;
+    border-color:rgba(255,92,92,.45);
+    padding:9px 13px;
+    margin-left:8px;
+}
+
+.delete-btn:hover{
+    background:rgba(110,0,0,.55);
+    border-color:var(--danger);
+}
+
+.action-row{
+    margin-top:10px;
+    display:flex;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:8px;
 }
 
 .login-card,
@@ -933,24 +970,6 @@ button:hover,
     margin:24px 0;
 }
 
-.pill-row{
-    display:flex;
-    flex-wrap:wrap;
-    gap:8px;
-    margin-bottom:28px;
-}
-
-.pill{
-    color:white;
-    background:rgba(255,255,255,.055);
-    border:1px solid rgba(255,255,255,.14);
-    padding:8px 11px;
-    border-radius:0;
-    font-size:12px;
-    font-weight:900;
-    letter-spacing:.4px;
-}
-
 @media(max-width:900px){
     body{
         overflow:auto;
@@ -1006,7 +1025,7 @@ button:hover,
 
             {% if auth_mode == "register" %}
                 <div class="login-title">Create account</div>
-                <div class="login-sub">Join the producer room. Upload beats, ZIP packs, patterns and discussions.</div>
+                <div class="login-sub">Create an account to access the site.</div>
 
                 <form action="/register" method="POST">
                     <div class="login-input-wrap">
@@ -1036,7 +1055,7 @@ button:hover,
                 </div>
             {% else %}
                 <div class="login-title">Login</div>
-                <div class="login-sub">Private producer space for files, discussion, credits and account settings.</div>
+                <div class="login-sub">Login to continue.</div>
 
                 <form action="/login" method="POST">
                     <div class="login-input-wrap">
@@ -1062,7 +1081,7 @@ button:hover,
                 <button class="btn btn-white" onclick="location.href='/?view=register'">Create Account</button>
 
                 <div class="switch-text">
-                    New producer? <a href="/?view=register">Register</a>
+                    New here? <a href="/?view=register">Register</a>
                 </div>
             {% endif %}
         </div>
@@ -1107,7 +1126,7 @@ button:hover,
         {% endwith %}
 
         <div class="page-title">loading</div>
-        <div class="small">opening your producer space.</div>
+        <div class="small">opening site.</div>
     </div>
 </div>
 
@@ -1115,7 +1134,7 @@ button:hover,
 
 <script>
 const files = {{ files|tojson }};
-const fileSizes = {{ file_sizes|tojson }};
+const fileInfo = {{ file_info|tojson }};
 const credits = {{ credits|tojson }};
 const discussions = {{ discussions|tojson }};
 const userEmail = {{ user_email|tojson }};
@@ -1178,37 +1197,27 @@ function showDashboard(button){
     const recentFiles = files.slice(0,3);
 
     let html=`
-        <div class="page-title">producer room</div>
-        <div class="page-sub">
-            Minimal private space for ZIP packs, MP3 previews, discussions and producer notes.
-        </div>
+        <div class="page-title">home</div>
+        <div class="page-sub">Files, discussions, account and credits.</div>
 
         <div class="grid">
             <div class="card">
                 <div class="card-label">files</div>
                 <div class="card-number">${files.length}</div>
-                <div class="card-text">ZIP packs and MP3 previews.</div>
+                <div class="card-text">Uploaded ZIP and MP3 files.</div>
             </div>
 
             <div class="card">
-                <div class="card-label">topics</div>
+                <div class="card-label">discussions</div>
                 <div class="card-number">${discussions.length}</div>
-                <div class="card-text">Feedback, questions and ideas.</div>
+                <div class="card-text">Created discussion posts.</div>
             </div>
 
             <div class="card">
                 <div class="card-label">comments</div>
                 <div class="card-number">${totalComments}</div>
-                <div class="card-text">Replies from members.</div>
+                <div class="card-text">Replies inside discussions.</div>
             </div>
-        </div>
-
-        <div class="pill-row">
-            <div class="pill">MTG</div>
-            <div class="pill">FL Studio</div>
-            <div class="pill">Drum Kits</div>
-            <div class="pill">Beat Feedback</div>
-            <div class="pill">Brazil Funk</div>
         </div>
 
         <div class="line">
@@ -1217,15 +1226,19 @@ function showDashboard(button){
     `;
 
     if(recentTopics.length === 0 && recentFiles.length === 0){
-        html += `<div class="small">No activity yet. Upload a file or start the first discussion.</div>`;
+        html += `<div class="small">No activity yet.</div>`;
     }
 
     recentFiles.forEach(file=>{
+        const info = fileInfo[file] || {};
         html += `
             <div class="file-row">
                 <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">file · ${escapeHtml(fileSizes[file] || "")}</div>
-                <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
+                <div class="meta">file · ${escapeHtml(info.size || "")} · by ${escapeHtml(info.owner || "unknown")}</div>
+                <div class="action-row">
+                    <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
+                    ${info.owner_email === userEmail ? deleteFileForm(file) : ""}
+                </div>
             </div>
         `;
     });
@@ -1235,19 +1248,15 @@ function showDashboard(button){
             <div class="topic-row">
                 <div class="topic-title">${escapeHtml(topic.title)}</div>
                 <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
-                <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
+                <div class="action-row">
+                    <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
+                    ${topic.author_email === userEmail ? deleteTopicForm(topic.id) : ""}
+                </div>
             </div>
         `;
     });
 
     html += `
-        </div>
-
-        <div class="form-box">
-            <div class="topic-title">quick actions</div>
-            <p class="small">Upload a pack or start a topic to keep the room active.</p>
-            <button onclick="showFiles(document.getElementById('menuFiles'))">upload file</button>
-            <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">start discussion</button>
         </div>
     `;
 
@@ -1263,7 +1272,7 @@ function showFiles(button){
 
     let html=`
         <div class="page-title">files</div>
-        <div class="page-sub">Upload ZIP packs or MP3 previews. Use ZIP for FLP, stems, drum kits and folders.</div>
+        <div class="page-sub">Upload ZIP or MP3 files.</div>
 
         <input id="searchInput" class="search-bar" placeholder="search files" oninput="filterFiles()">
 
@@ -1275,11 +1284,16 @@ function showFiles(button){
     }
 
     files.forEach(file=>{
+        const info = fileInfo[file] || {};
+
         html+=`
             <div class="file-row" data-name="${escapeAttr(file.toLowerCase())}">
                 <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">${escapeHtml(fileSizes[file] || "")}</div>
-                <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
+                <div class="meta">${escapeHtml(info.size || "")} · by ${escapeHtml(info.owner || "unknown")}</div>
+                <div class="action-row">
+                    <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
+                    ${info.owner_email === userEmail ? deleteFileForm(file) : ""}
+                </div>
             </div>
         `;
     });
@@ -1290,12 +1304,12 @@ function showFiles(button){
         <div class="form-box">
             <form action="/upload" method="POST" enctype="multipart/form-data">
                 <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3" required hidden>
-                <label for="fileInput" class="file-button">select zip or mp3</label>
+                <label for="fileInput" class="file-button">select file</label>
                 <span id="fileName" class="selected-file">no file selected</span>
                 <br><br>
-                <button class="primary-btn" type="submit">upload file</button>
+                <button class="primary-btn" type="submit">upload</button>
             </form>
-            <p class="small">allowed: zip and mp3 only. maximum size: 1 GB.</p>
+            <p class="small">allowed: zip and mp3 only.</p>
         </div>
     `;
 
@@ -1320,7 +1334,7 @@ function showDiscussion(button){
 
     let html=`
         <div class="page-title">discussion</div>
-        <div class="page-sub">Ask for feedback, share FL Studio tricks, post beat ideas, or start producer challenges.</div>
+        <div class="page-sub">Create or reply to discussion posts.</div>
 
         <input id="discussionSearchInput" class="search-bar" placeholder="search discussions" oninput="filterDiscussions()">
 
@@ -1328,7 +1342,7 @@ function showDiscussion(button){
     `;
 
     if(discussions.length===0){
-        html+=`<div class="small">no topics yet.</div>`;
+        html+=`<div class="small">no posts yet.</div>`;
     }
 
     discussions.forEach(topic=>{
@@ -1339,8 +1353,10 @@ function showDiscussion(button){
                 <div class="topic-title">${escapeHtml(topic.title)}</div>
                 <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
                 <div class="small">${escapeHtml(topic.body).slice(0,140)}${topic.body.length > 140 ? "..." : ""}</div>
-                <br>
-                <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
+                <div class="action-row">
+                    <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
+                    ${topic.author_email === userEmail ? deleteTopicForm(topic.id) : ""}
+                </div>
             </div>
         `;
     });
@@ -1350,10 +1366,10 @@ function showDiscussion(button){
     html+=`
         <div class="form-box">
             <form action="/topic" method="POST">
-                <input name="title" placeholder="topic title" required style="width:100%;">
-                <textarea name="body" placeholder="write topic text" required></textarea>
+                <input name="title" placeholder="post title" required style="width:100%;">
+                <textarea name="body" placeholder="write post" required></textarea>
                 <br><br>
-                <button class="primary-btn" type="submit">add topic</button>
+                <button class="primary-btn" type="submit">post</button>
             </form>
         </div>
     `;
@@ -1383,8 +1399,13 @@ function openTopic(topicId){
     let html=`
         <div class="page-title">${escapeHtml(topic.title)}</div>
         <div class="page-sub">by ${escapeHtml(topic.author)}</div>
-        <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">back to discussion</button>
-        <br><br>
+
+        <div class="action-row">
+            <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">back</button>
+            ${topic.author_email === userEmail ? deleteTopicForm(topic.id) : ""}
+        </div>
+
+        <br>
 
         <div class="line">
             <div class="small">${escapeHtml(topic.body).replaceAll("\\n","<br>")}</div>
@@ -1412,7 +1433,7 @@ function openTopic(topicId){
             <form action="/comment/${topic.id}" method="POST">
                 <textarea name="body" placeholder="write comment" required></textarea>
                 <br><br>
-                <button class="primary-btn" type="submit">add comment</button>
+                <button class="primary-btn" type="submit">comment</button>
             </form>
         </div>
     `;
@@ -1429,7 +1450,7 @@ function showAccount(button){
 
     let html=`
         <div class="page-title">account</div>
-        <div class="page-sub">Edit your username, password or logout.</div>
+        <div class="page-sub">Edit your account.</div>
 
         <div class="line">
             <div class="account-box">
@@ -1476,7 +1497,7 @@ function showCredits(button){
 
     let html=`
         <div class="page-title">credits</div>
-        <div class="page-sub">People behind the site.</div>
+        <div class="page-sub">Site credits.</div>
 
         <div class="line">
             <div class="credit-heading">OWNERS</div>
@@ -1518,6 +1539,22 @@ function showCredits(button){
 
     html+=`</div>`;
     fadeChange(html);
+}
+
+function deleteTopicForm(topicId){
+    return `
+        <form action="/delete-topic/${encodeURIComponent(topicId)}" method="POST" onsubmit="return confirm('Delete this post?');">
+            <button class="delete-btn" type="submit">delete post</button>
+        </form>
+    `;
+}
+
+function deleteFileForm(filename){
+    return `
+        <form action="/delete-file/${encodeURIComponent(filename)}" method="POST" onsubmit="return confirm('Delete this file?');">
+            <button class="delete-btn" type="submit">delete file</button>
+        </form>
+    `;
 }
 
 function escapeHtml(text){
@@ -1575,12 +1612,11 @@ def home():
             requested_view = "dashboard"
 
     files = get_files() if logged_in else []
-    file_sizes = {file: file_size_text(file) for file in files}
 
     return render_template_string(
         HTML,
         files=files,
-        file_sizes=file_sizes,
+        file_info=get_file_info(files),
         credits=CREDITS,
         discussions=load_discussions() if logged_in else [],
         user_email=current_user(),
@@ -1752,6 +1788,14 @@ def upload():
 
     file.save(save_path)
 
+    meta = load_files_meta()
+    meta[filename] = {
+        "owner": current_username(),
+        "owner_email": current_user(),
+        "uploaded": int(time.time())
+    }
+    save_files_meta(meta)
+
     flash("File uploaded successfully.", "success")
     return go("files")
 
@@ -1773,6 +1817,31 @@ def download(filename):
     )
 
 
+@app.route("/delete-file/<path:filename>", methods=["POST"])
+@login_required
+def delete_file(filename):
+    filename = secure_filename(filename)
+
+    meta = load_files_meta()
+    file_data = meta.get(filename, {})
+
+    if file_data.get("owner_email") != current_user():
+        flash("You can only delete files you uploaded.", "error")
+        return go("files")
+
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+    if filename in meta:
+        del meta[filename]
+        save_files_meta(meta)
+
+    flash("File deleted.", "success")
+    return go("files")
+
+
 @app.route("/topic", methods=["POST"])
 @login_required
 def add_topic():
@@ -1780,7 +1849,7 @@ def add_topic():
     body = request.form.get("body", "").strip()
 
     if not title or not body:
-        flash("Topic title and text are required.", "error")
+        flash("Post title and text are required.", "error")
         return go("discussion")
 
     topic_id = str(int(time.time() * 1000))
@@ -1799,8 +1868,28 @@ def add_topic():
 
     save_discussions(discussions)
 
-    flash("Topic added.", "success")
+    flash("Post added.", "success")
     return go("topic", topic_id)
+
+
+@app.route("/delete-topic/<topic_id>", methods=["POST"])
+@login_required
+def delete_topic(topic_id):
+    discussions = load_discussions()
+
+    for topic in discussions:
+        if topic.get("id") == topic_id:
+            if topic.get("author_email") != current_user():
+                flash("You can only delete posts you created.", "error")
+                return go("discussion")
+
+            discussions = [t for t in discussions if t.get("id") != topic_id]
+            save_discussions(discussions)
+            flash("Post deleted.", "success")
+            return go("discussion")
+
+    flash("Post not found.", "error")
+    return go("discussion")
 
 
 @app.route("/comment/<topic_id>", methods=["POST"])
@@ -1832,7 +1921,7 @@ def add_comment(topic_id):
         flash("Comment added.", "success")
         return go("topic", topic_id)
 
-    flash("Topic not found.", "error")
+    flash("Post not found.", "error")
     return go("discussion")
 
 
