@@ -1,6 +1,5 @@
 import os
 import json
-import gzip
 import time
 import secrets
 from functools import wraps
@@ -11,46 +10,16 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "uploads"
-DATA_FOLDER = "data"
+UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "uploads")
+DATA_FOLDER = os.environ.get("DATA_FOLDER", "data")
 
 USERS_FILE = os.path.join(DATA_FOLDER, "users.json")
 DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json")
 FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json")
-
-OLD_USERS_FILE = os.path.join(DATA_FOLDER, "users.json.gz")
-OLD_DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json.gz")
-OLD_FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json.gz")
-
 SECRET_FILE = os.path.join(DATA_FOLDER, "secret_key.txt")
 
 MAX_FILE_SIZE = 1024 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".zip", ".mp3"}
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(DATA_FOLDER, exist_ok=True)
-os.makedirs("static", exist_ok=True)
-
-
-def get_or_create_secret_key():
-    if os.path.exists(SECRET_FILE):
-        with open(SECRET_FILE, "r", encoding="utf-8") as f:
-            key = f.read().strip()
-            if key:
-                return key
-
-    key = secrets.token_hex(64)
-
-    with open(SECRET_FILE, "w", encoding="utf-8") as f:
-        f.write(key)
-
-    return key
-
-
-app.secret_key = get_or_create_secret_key()
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
-
 
 CREDITS = {
     "OWNERS": [
@@ -72,37 +41,45 @@ CREDITS = {
 }
 
 
-def migrate_gz_to_json(json_path, gz_path, default):
-    if os.path.exists(json_path):
-        return
+def setup_project_files():
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    os.makedirs("static", exist_ok=True)
 
-    if not os.path.exists(gz_path):
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=4, ensure_ascii=False)
-        return
+    default_files = {
+        USERS_FILE: {},
+        DISCUSSION_FILE: [],
+        FILES_META_FILE: {}
+    }
 
-    try:
-        with gzip.open(gz_path, "rt", encoding="utf-8") as f:
-            data = json.load(f)
+    for path, default_data in default_files.items():
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(default_data, f, indent=4, ensure_ascii=False)
 
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+    if not os.path.exists(SECRET_FILE):
+        with open(SECRET_FILE, "w", encoding="utf-8") as f:
+            f.write(secrets.token_hex(64))
 
-        print(f"Migrated {gz_path} -> {json_path}")
 
-    except Exception as e:
-        print(f"Could not migrate {gz_path}: {e}")
+setup_project_files()
 
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=4, ensure_ascii=False)
+
+def get_secret_key():
+    env_key = os.environ.get("SECRET_KEY")
+    if env_key:
+        return env_key
+
+    with open(SECRET_FILE, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+app.secret_key = get_secret_key()
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
 
 def load_json(path, default):
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=4, ensure_ascii=False)
-        return default
-
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -116,7 +93,6 @@ def save_json(path, data):
 
 
 def load_users():
-    migrate_gz_to_json(USERS_FILE, OLD_USERS_FILE, {})
     return load_json(USERS_FILE, {})
 
 
@@ -125,7 +101,6 @@ def save_users(users):
 
 
 def load_discussions():
-    migrate_gz_to_json(DISCUSSION_FILE, OLD_DISCUSSION_FILE, [])
     return load_json(DISCUSSION_FILE, [])
 
 
@@ -134,7 +109,6 @@ def save_discussions(data):
 
 
 def load_files_meta():
-    migrate_gz_to_json(FILES_META_FILE, OLD_FILES_META_FILE, {})
     return load_json(FILES_META_FILE, {})
 
 
@@ -276,6 +250,9 @@ def block_guest_actions():
         "register",
         "static"
     }
+
+    if request.endpoint is None:
+        return
 
     if request.endpoint in allowed_endpoints:
         return
