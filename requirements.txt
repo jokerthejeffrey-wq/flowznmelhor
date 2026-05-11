@@ -1,5 +1,5 @@
-flask
+Flask
+Flask-Mail
+Authlib
+Werkzeug
 gunicorn
-werkzeug
-flask-mail
-authlib
