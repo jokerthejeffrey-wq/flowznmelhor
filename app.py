@@ -12,44 +12,36 @@ app = Flask(__name__)
 
 UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "uploads")
 DATA_FOLDER = os.environ.get("DATA_FOLDER", "data")
+PROFILE_PICS_FOLDER = os.path.join(UPLOAD_FOLDER, "profile_pics")
 
 USERS_FILE = os.path.join(DATA_FOLDER, "users.json")
 DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json")
 FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json")
+NOTIFICATIONS_FILE = os.path.join(DATA_FOLDER, "notifications.json")
 SECRET_FILE = os.path.join(DATA_FOLDER, "secret_key.txt")
 
 MAX_FILE_SIZE = 1024 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".zip", ".mp3"}
+ALLOWED_PROFILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 CREDITS = {
-    "OWNERS": [
-        "DJ TUTTER",
-        "DJ LIRA DA ZL"
-    ],
-    "MEMBERS": [
-        "DJ FRG 011",
-        "DJ PLT 011",
-        "DJ RGLX",
-        "DJ RDC",
-        "DJ SABA 7",
-        "DJ RE7 013",
-        "RSFI"
-    ],
-    "WEBSITE MADE BY": [
-        "DJ SABA 7"
-    ]
+    "OWNERS": ["DJ TUTTER", "DJ LIRA DA ZL"],
+    "MEMBERS": ["DJ FRG 011", "DJ PLT 011", "DJ RGLX", "DJ RDC", "DJ SABA 7", "DJ RE7 013", "RSFI"],
+    "WEBSITE MADE BY": ["DJ SABA 7"]
 }
 
 
 def setup_project_files():
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    os.makedirs(PROFILE_PICS_FOLDER, exist_ok=True)
     os.makedirs(DATA_FOLDER, exist_ok=True)
     os.makedirs("static", exist_ok=True)
 
     default_files = {
         USERS_FILE: {},
         DISCUSSION_FILE: [],
-        FILES_META_FILE: {}
+        FILES_META_FILE: {},
+        NOTIFICATIONS_FILE: []
     }
 
     for path, default_data in default_files.items():
@@ -116,20 +108,76 @@ def save_files_meta(data):
     save_json(FILES_META_FILE, data)
 
 
+def load_notifications():
+    return load_json(NOTIFICATIONS_FILE, [])
+
+
+def save_notifications(data):
+    save_json(NOTIFICATIONS_FILE, data)
+
+
 def current_user():
     return session.get("email")
 
 
 def current_username():
     email = current_user()
-
     if not email:
         return ""
 
     users = load_users()
     user = users.get(email, {})
-
     return user.get("username", email)
+
+
+def get_user_by_username(username):
+    username = username.strip().lower()
+    users = load_users()
+
+    for email, user in users.items():
+        if user.get("username", "").strip().lower() == username:
+            return email, user
+
+    return None, None
+
+
+def profile_pic_url(filename):
+    if not filename:
+        return ""
+    return url_for("profile_pic", filename=filename)
+
+
+def get_current_profile():
+    email = current_user()
+    users = load_users()
+    user = users.get(email, {})
+
+    username = user.get("username", "")
+    return {
+        "username": username,
+        "email": email,
+        "description": user.get("description", ""),
+        "profile_pic": user.get("profile_pic", ""),
+        "pic_url": profile_pic_url(user.get("profile_pic", "")) if user.get("profile_pic") else "",
+        "initial": username[:1].upper() if username else "?"
+    }
+
+
+def get_public_profiles():
+    users = load_users()
+    profiles = []
+
+    for email, user in users.items():
+        username = user.get("username", email)
+        profiles.append({
+            "username": username,
+            "description": user.get("description", ""),
+            "pic_url": profile_pic_url(user.get("profile_pic", "")) if user.get("profile_pic") else "",
+            "initial": username[:1].upper() if username else "?",
+            "created": user.get("created", 0)
+        })
+
+    return sorted(profiles, key=lambda x: x["username"].lower())
 
 
 def valid_username(username):
@@ -188,6 +236,11 @@ def allowed_file(filename):
     return ext in ALLOWED_EXTENSIONS
 
 
+def allowed_profile_pic(filename):
+    ext = os.path.splitext(filename.lower())[1]
+    return ext in ALLOWED_PROFILE_EXTENSIONS
+
+
 def get_files():
     data = []
 
@@ -230,13 +283,44 @@ def get_file_info(files):
     return result
 
 
+def add_notification(owner_email, notif_type, message, from_email="", from_username="", extra=None):
+    if not owner_email:
+        return
+
+    if owner_email == from_email:
+        return
+
+    notifications = load_notifications()
+
+    notifications.insert(0, {
+        "id": secrets.token_hex(8),
+        "owner_email": owner_email,
+        "type": notif_type,
+        "message": message,
+        "from_email": from_email,
+        "from_username": from_username,
+        "extra": extra or {},
+        "created": int(time.time())
+    })
+
+    save_notifications(notifications)
+
+
+def get_my_notifications():
+    email = current_user()
+    if not email:
+        return []
+
+    notifications = load_notifications()
+    return [n for n in notifications if n.get("owner_email") == email]
+
+
 def login_required(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         if not current_user():
             flash("Please login first.", "error")
             return redirect(url_for("home", view="login"))
-
         return func(*args, **kwargs)
 
     return wrapper
@@ -244,12 +328,7 @@ def login_required(func):
 
 @app.before_request
 def block_guest_actions():
-    allowed_endpoints = {
-        "home",
-        "login",
-        "register",
-        "static"
-    }
+    allowed_endpoints = {"home", "login", "register", "static"}
 
     if request.endpoint is None:
         return
@@ -265,7 +344,6 @@ def block_guest_actions():
 def go(view="dashboard", topic_id=None):
     if topic_id:
         return redirect(url_for("home", view=view, id=topic_id))
-
     return redirect(url_for("home", view=view))
 
 
@@ -277,16 +355,13 @@ HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
-*{
-    box-sizing:border-box;
-}
+*{box-sizing:border-box}
 
 :root{
     --white:#ffffff;
     --text:#f8fbff;
     --muted:rgba(255,255,255,.68);
     --blue:#9fe7ff;
-    --dark:#06101d;
     --panel:rgba(3,10,18,.78);
     --line:rgba(255,255,255,.24);
     --thin:rgba(255,255,255,.12);
@@ -371,12 +446,9 @@ body::after{
     background:linear-gradient(90deg, transparent, rgba(159,231,255,.8), transparent);
 }
 
-.login-inner{
-    position:relative;
-    z-index:2;
-}
+.login-inner{position:relative;z-index:2}
 
-.login-logo{
+.login-logo,.title{
     font-size:11px;
     letter-spacing:4px;
     font-weight:900;
@@ -385,7 +457,7 @@ body::after{
     text-transform:uppercase;
 }
 
-.login-logo::after{
+.login-logo::after,.title::after{
     content:"";
     display:block;
     width:44px;
@@ -402,17 +474,14 @@ body::after{
     letter-spacing:-1px;
 }
 
-.login-sub{
+.login-sub,.page-sub{
     color:var(--muted);
     font-size:13px;
     line-height:1.7;
     margin-bottom:26px;
 }
 
-.login-input-wrap{
-    position:relative;
-    margin-bottom:16px;
-}
+.login-input-wrap{position:relative;margin-bottom:16px}
 
 .login-input-wrap input{
     width:100%;
@@ -427,15 +496,8 @@ body::after{
     border-radius:0;
 }
 
-.login-input-wrap input::placeholder{
-    color:rgba(255,255,255,.62);
-    font-weight:500;
-}
-
-.login-input-wrap input:focus{
-    background:rgba(255,255,255,.07);
-    border-bottom-color:var(--blue);
-}
+.login-input-wrap input::placeholder{color:rgba(255,255,255,.62)}
+.login-input-wrap input:focus{background:rgba(255,255,255,.07);border-bottom-color:var(--blue)}
 
 .login-icon{
     position:absolute;
@@ -455,9 +517,7 @@ body::after{
     margin:6px 0 22px;
 }
 
-.login-row input{
-    accent-color:white;
-}
+.login-row input{accent-color:white}
 
 .btn{
     display:inline-flex;
@@ -475,31 +535,12 @@ body::after{
     letter-spacing:.4px;
 }
 
-.btn-dark{
-    background:#06101d;
-    color:white;
-}
+.btn-dark{background:#06101d;color:white}
+.btn-dark:hover{background:#0d2235;border-color:var(--blue)}
+.btn-white{background:white;color:#06101d;border-color:white}
+.btn-white:hover{background:#e9f8ff}
 
-.btn-dark:hover{
-    background:#0d2235;
-    border-color:var(--blue);
-}
-
-.btn-white{
-    background:white;
-    color:#06101d;
-    border-color:white;
-}
-
-.btn-white:hover{
-    background:#e9f8ff;
-}
-
-.login-line{
-    height:1px;
-    background:rgba(255,255,255,.22);
-    margin:18px 0 14px;
-}
+.login-line{height:1px;background:rgba(255,255,255,.22);margin:18px 0 14px}
 
 .switch-text{
     color:rgba(255,255,255,.72);
@@ -508,14 +549,9 @@ body::after{
     margin-top:18px;
 }
 
-.switch-text a{
-    color:white;
-    font-weight:900;
-    text-decoration:none;
-}
+.switch-text a{color:white;font-weight:900;text-decoration:none}
 
-.alert-box,
-.success-box{
+.alert-box,.success-box{
     padding:12px 14px;
     margin-bottom:18px;
     font-size:13px;
@@ -549,36 +585,41 @@ body::after{
     border-radius:0;
 }
 
-.title{
-    font-size:11px;
-    letter-spacing:4px;
-    color:white;
-    margin-bottom:28px;
-    font-weight:900;
-    text-transform:uppercase;
-}
-
-.title::after{
-    content:"";
-    display:block;
-    width:42px;
-    height:1px;
-    background:var(--blue);
-    margin-top:12px;
-}
-
 .user-mini{
     background:rgba(255,255,255,.045);
     border:1px solid rgba(255,255,255,.12);
     border-radius:0;
     padding:12px;
     margin-bottom:24px;
+    display:flex;
+    gap:12px;
+    align-items:center;
+}
+
+.side-avatar,.profile-avatar-img{
+    width:46px;
+    height:46px;
+    object-fit:cover;
+    border:1px solid rgba(255,255,255,.22);
+}
+
+.avatar-fallback,.profile-avatar-fallback{
+    width:46px;
+    height:46px;
+    border:1px solid rgba(255,255,255,.22);
+    background:rgba(255,255,255,.06);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-weight:900;
+    color:white;
 }
 
 .user-mini-name{
     color:white;
     font-weight:900;
     font-size:14px;
+    cursor:pointer;
 }
 
 .user-mini-mail{
@@ -588,14 +629,8 @@ body::after{
     word-break:break-all;
 }
 
-.menu-main{
-    flex:1;
-}
-
-.menu-bottom{
-    border-top:1px solid var(--thin);
-    padding-top:18px;
-}
+.menu-main{flex:1}
+.menu-bottom{border-top:1px solid var(--thin);padding-top:18px}
 
 .item{
     cursor:pointer;
@@ -609,24 +644,15 @@ body::after{
     font-size:13px;
     letter-spacing:.7px;
     border-left:1px solid transparent;
+    text-transform:uppercase;
+    font-weight:800;
 }
 
-.item:hover,
-.item.active{
+.item:hover,.item.active{
     color:white;
     background:rgba(255,255,255,.075);
     border-left-color:var(--blue);
     transform:translateX(3px);
-}
-
-.clicked{
-    animation:clickFade .28s ease;
-}
-
-@keyframes clickFade{
-    0%{opacity:1}
-    45%{opacity:.45;transform:translateX(7px)}
-    100%{opacity:1;transform:translateX(3px)}
 }
 
 .content{
@@ -642,23 +668,11 @@ body::after{
     border-radius:0;
 }
 
-.content.fade{
-    opacity:0;
-    transform:translateY(6px);
-}
+.content.fade{opacity:0;transform:translateY(6px)}
 
-.content::-webkit-scrollbar{
-    width:8px;
-}
-
-.content::-webkit-scrollbar-track{
-    background:rgba(255,255,255,.04);
-}
-
-.content::-webkit-scrollbar-thumb{
-    background:rgba(255,255,255,.24);
-    border-radius:0;
-}
+.content::-webkit-scrollbar{width:8px}
+.content::-webkit-scrollbar-track{background:rgba(255,255,255,.04)}
+.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.24);border-radius:0}
 
 .page-title{
     font-size:32px;
@@ -668,14 +682,6 @@ body::after{
     letter-spacing:-1px;
 }
 
-.page-sub{
-    color:var(--muted);
-    font-size:13px;
-    line-height:1.7;
-    margin-bottom:28px;
-    max-width:760px;
-}
-
 .grid{
     display:grid;
     grid-template-columns:repeat(3,minmax(0,1fr));
@@ -683,110 +689,17 @@ body::after{
     margin-bottom:28px;
 }
 
-.card{
+.card,.file-row,.topic-row,.credit-row,.comment-row,.notification-row{
     background:rgba(255,255,255,.045);
     border:1px solid rgba(255,255,255,.14);
     border-radius:0;
-    padding:18px;
-    transition:.16s ease;
-    position:relative;
-}
-
-.card::before{
-    content:"";
-    position:absolute;
-    left:0;
-    top:0;
-    width:34px;
-    height:1px;
-    background:var(--blue);
-    opacity:.7;
-}
-
-.card:hover{
-    background:rgba(255,255,255,.07);
-    border-color:rgba(159,231,255,.46);
-}
-
-.card-label{
-    color:var(--muted);
-    font-size:11px;
-    letter-spacing:1.8px;
-    text-transform:uppercase;
-    margin-bottom:10px;
-}
-
-.card-number{
-    color:white;
-    font-size:29px;
-    font-weight:900;
-}
-
-.card-text{
-    color:var(--muted);
-    font-size:13px;
-    line-height:1.6;
-    margin-top:8px;
-}
-
-.line{
-    border-left:1px solid rgba(255,255,255,.26);
-    padding-left:24px;
-    max-width:980px;
-}
-
-input,
-textarea{
-    background:rgba(255,255,255,.045);
-    color:white;
-    border:1px solid rgba(255,255,255,.22);
-    border-radius:0;
-    padding:13px 14px;
-    outline:none;
-    font-size:14px;
-    backdrop-filter:blur(10px);
-}
-
-input::placeholder,
-textarea::placeholder{
-    color:rgba(255,255,255,.52);
-}
-
-input:focus,
-textarea:focus{
-    border-color:var(--blue);
-    background:rgba(255,255,255,.07);
-}
-
-textarea{
-    width:100%;
-    min-height:96px;
-    resize:vertical;
-    margin-top:10px;
-}
-
-.search-bar{
-    width:330px;
-    margin-bottom:26px;
-}
-
-.file-row,
-.topic-row,
-.credit-row,
-.comment-row{
-    margin-bottom:14px;
     padding:15px 17px;
-    background:rgba(255,255,255,.045);
-    border:1px solid rgba(255,255,255,.13);
-    border-radius:0;
     transition:.16s ease;
     position:relative;
+    margin-bottom:14px;
 }
 
-.file-row::before,
-.topic-row::before,
-.credit-row::before,
-.comment-row::before{
+.card::before,.file-row::before,.topic-row::before,.credit-row::before,.comment-row::before,.notification-row::before{
     content:"";
     position:absolute;
     left:0;
@@ -798,41 +711,69 @@ textarea{
     transition:.16s ease;
 }
 
-.file-row:hover,
-.topic-row:hover,
-.credit-row:hover,
-.comment-row:hover{
+.card:hover,.file-row:hover,.topic-row:hover,.credit-row:hover,.comment-row:hover,.notification-row:hover{
     background:rgba(255,255,255,.07);
     border-color:rgba(159,231,255,.38);
 }
 
-.file-row:hover::before,
-.topic-row:hover::before,
-.credit-row:hover::before,
-.comment-row:hover::before{
+.card:hover::before,.file-row:hover::before,.topic-row:hover::before,.credit-row:hover::before,.comment-row:hover::before,.notification-row:hover::before{
     opacity:1;
 }
 
-.file-title,
-.credit-name,
-.topic-title{
+.card-label{
+    color:var(--muted);
+    font-size:11px;
+    letter-spacing:1.8px;
+    text-transform:uppercase;
+    margin-bottom:10px;
+}
+
+.card-number{color:white;font-size:29px;font-weight:900}
+.card-text{color:var(--muted);font-size:13px;line-height:1.6;margin-top:8px}
+
+.line{
+    border-left:1px solid rgba(255,255,255,.26);
+    padding-left:24px;
+    max-width:980px;
+}
+
+input,textarea{
+    background:rgba(255,255,255,.045);
+    color:white;
+    border:1px solid rgba(255,255,255,.22);
+    border-radius:0;
+    padding:13px 14px;
+    outline:none;
+    font-size:14px;
+    backdrop-filter:blur(10px);
+}
+
+input::placeholder,textarea::placeholder{color:rgba(255,255,255,.52)}
+input:focus,textarea:focus{border-color:var(--blue);background:rgba(255,255,255,.07)}
+
+textarea{
+    width:100%;
+    min-height:96px;
+    resize:vertical;
+    margin-top:10px;
+}
+
+.search-bar{width:330px;margin-bottom:26px}
+
+.file-title,.credit-name,.topic-title{
     font-size:15px;
     color:white;
     margin-bottom:7px;
     font-weight:900;
 }
 
-.meta,
-.topic-meta,
-.comment-meta,
-.small{
+.meta,.topic-meta,.comment-meta,.small{
     color:var(--muted);
     font-size:13px;
     line-height:1.7;
 }
 
-.file-link,
-.topic-open{
+.file-link,.topic-open,.profile-name{
     color:var(--blue);
     text-decoration:none;
     font-size:13px;
@@ -842,8 +783,7 @@ textarea{
     font-weight:900;
 }
 
-.file-link:hover,
-.topic-open:hover{
+.file-link:hover,.topic-open:hover,.profile-name:hover{
     color:white;
     padding-left:4px;
 }
@@ -855,8 +795,7 @@ textarea{
     max-width:740px;
 }
 
-button,
-.file-button{
+button,.file-button{
     display:inline-flex;
     align-items:center;
     justify-content:center;
@@ -875,22 +814,10 @@ button,
     backdrop-filter:blur(10px);
 }
 
-button:hover,
-.file-button:hover{
-    background:#102b43;
-    border-color:var(--blue);
-}
+button:hover,.file-button:hover{background:#102b43;border-color:var(--blue)}
 
-.primary-btn{
-    background:white;
-    color:#06101d;
-    border-color:white;
-}
-
-.primary-btn:hover{
-    background:#e9f8ff;
-    color:#000;
-}
+.primary-btn{background:white;color:#06101d;border-color:white}
+.primary-btn:hover{background:#e9f8ff;color:#000}
 
 .delete-btn{
     background:rgba(70,0,0,.35);
@@ -900,10 +827,7 @@ button:hover,
     margin-left:8px;
 }
 
-.delete-btn:hover{
-    background:rgba(110,0,0,.55);
-    border-color:var(--danger);
-}
+.delete-btn:hover{background:rgba(110,0,0,.55);border-color:var(--danger)}
 
 .action-row{
     margin-top:10px;
@@ -913,9 +837,8 @@ button:hover,
     gap:8px;
 }
 
-.login-card,
 .account-box{
-    width:430px;
+    width:520px;
     background:rgba(255,255,255,.045);
     border:1px solid rgba(255,255,255,.18);
     border-radius:0;
@@ -937,26 +860,9 @@ button:hover,
     margin-bottom:24px;
 }
 
-.login-btn{
-    width:100%;
-    margin-bottom:12px;
-    height:46px;
-}
-
-.login-input{
-    width:100%;
-    margin-bottom:12px;
-}
-
-.selected-file{
-    color:var(--muted);
-    font-size:13px;
-    margin-left:10px;
-}
-
-.comment-row{
-    border-left:1px solid rgba(159,231,255,.32);
-}
+.login-btn{width:100%;margin-bottom:12px;height:46px}
+.login-input{width:100%;margin-bottom:12px}
+.selected-file{color:var(--muted);font-size:13px;margin-left:10px}
 
 .account-section{
     margin-top:28px;
@@ -972,44 +878,34 @@ button:hover,
     font-weight:900;
 }
 
-.credit-heading:first-child{
-    margin-top:0;
+.credit-heading:first-child{margin-top:0}
+.credit-divider{border-top:1px solid rgba(255,255,255,.22);width:280px;margin:24px 0}
+
+.profile-head{
+    display:flex;
+    align-items:center;
+    gap:20px;
+    margin-bottom:28px;
 }
 
-.credit-divider{
-    border-top:1px solid rgba(255,255,255,.22);
-    width:280px;
-    margin:24px 0;
+.profile-avatar-img,.profile-avatar-fallback{
+    width:86px;
+    height:86px;
+    font-size:30px;
+}
+
+.notification-count{
+    color:var(--blue);
+    font-weight:900;
 }
 
 @media(max-width:900px){
-    body{
-        overflow:auto;
-    }
-
-    .app{
-        height:auto;
-        min-height:100vh;
-        flex-direction:column;
-    }
-
-    .side{
-        width:100%;
-    }
-
-    .content{
-        padding:28px;
-    }
-
-    .grid{
-        grid-template-columns:1fr;
-    }
-
-    .login-card,
-    .account-box,
-    .search-bar{
-        width:100%;
-    }
+    body{overflow:auto}
+    .app{height:auto;min-height:100vh;flex-direction:column}
+    .side{width:100%}
+    .content{padding:28px}
+    .grid{grid-template-columns:1fr}
+    .account-box,.search-bar{width:100%}
 }
 </style>
 </head>
@@ -1107,19 +1003,27 @@ button:hover,
         <div class="title">FLOWZNMELHOR</div>
 
         <div class="user-mini">
-            <div class="user-mini-name">{{ username }}</div>
-            <div class="user-mini-mail">{{ user_email }}</div>
+            {% if current_profile.pic_url %}
+                <img class="side-avatar" src="{{ current_profile.pic_url }}">
+            {% else %}
+                <div class="avatar-fallback">{{ current_profile.initial }}</div>
+            {% endif %}
+            <div>
+                <div class="user-mini-name" onclick="openProfile('{{ username }}')">{{ username }}</div>
+                <div class="user-mini-mail">{{ user_email }}</div>
+            </div>
         </div>
 
         <div class="menu-main">
-            <div class="item" id="menuDashboard" onclick="showDashboard(this)">home</div>
-            <div class="item" id="menuFiles" onclick="showFiles(this)">files</div>
-            <div class="item" id="menuDiscussion" onclick="showDiscussion(this)">discussion</div>
+            <div class="item" id="menuDashboard" onclick="showDashboard(this)">HOME</div>
+            <div class="item" id="menuFiles" onclick="showFiles(this)">FILES</div>
+            <div class="item" id="menuDiscussion" onclick="showDiscussion(this)">DISCUSSION</div>
+            <div class="item" id="menuNotifications" onclick="showNotifications(this)">NOTIFICATIONS <span class="notification-count">{{ notification_count }}</span></div>
         </div>
 
         <div class="menu-bottom">
-            <div class="item" id="menuAccount" onclick="showAccount(this)">account</div>
-            <div class="item" id="menuCredits" onclick="showCredits(this)">credits</div>
+            <div class="item" id="menuAccount" onclick="showAccount(this)">ACCOUNT</div>
+            <div class="item" id="menuCredits" onclick="showCredits(this)">CREDITS</div>
         </div>
     </div>
 
@@ -1149,10 +1053,13 @@ const files = {{ files|tojson }};
 const fileInfo = {{ file_info|tojson }};
 const credits = {{ credits|tojson }};
 const discussions = {{ discussions|tojson }};
+const profiles = {{ profiles|tojson }};
+const notifications = {{ notifications|tojson }};
 const userEmail = {{ user_email|tojson }};
 const username = {{ username|tojson }};
 const startView = {{ start_view|tojson }};
 const startTopicId = {{ start_topic_id|tojson }};
+const startProfileUsername = {{ start_profile_username|tojson }};
 
 function clickEffect(el){
     if(!el) return;
@@ -1171,6 +1078,7 @@ function fadeChange(html){
         content.innerHTML=html;
         content.classList.remove("fade");
         bindFileInput();
+        bindProfilePicInput();
     },140);
 }
 
@@ -1185,16 +1093,52 @@ function bindFileInput(){
     });
 }
 
+function bindProfilePicInput(){
+    const input=document.getElementById("profilePicInput");
+    const name=document.getElementById("profilePicName");
+
+    if(!input || !name) return;
+
+    input.addEventListener("change",()=>{
+        name.textContent=input.files.length ? input.files[0].name : "no picture selected";
+    });
+}
+
 function clearActive(){
     document.querySelectorAll(".item").forEach(i=>i.classList.remove("active"));
 }
 
-function setUrl(view, topicId=null){
+function setUrl(view, topicId=null, profileUsername=null){
     if(view === "topic" && topicId){
         window.history.replaceState(null, "", "/?view=topic&id=" + encodeURIComponent(topicId));
+    }else if(view === "profile" && profileUsername){
+        window.history.replaceState(null, "", "/?view=profile&u=" + encodeURIComponent(profileUsername));
     }else{
         window.history.replaceState(null, "", "/?view=" + encodeURIComponent(view));
     }
+}
+
+function openProfile(name){
+    if(!name || name === "unknown") return;
+    window.location.href = "/profile/" + encodeURIComponent(name);
+}
+
+function profileSpan(name){
+    if(!name || name === "unknown") return escapeHtml(name || "unknown");
+    return `<span class="profile-name" onclick="openProfile('${escapeAttr(name)}')">${escapeHtml(name)}</span>`;
+}
+
+function avatarHtml(profile){
+    if(profile.pic_url){
+        return `<img class="profile-avatar-img" src="${escapeAttr(profile.pic_url)}">`;
+    }
+    return `<div class="profile-avatar-fallback">${escapeHtml(profile.initial || "?")}</div>`;
+}
+
+function timeText(seconds){
+    if(!seconds) return "";
+    const d = new Date(seconds * 1000);
+    return d.toLocaleString();
 }
 
 function showDashboard(button){
@@ -1246,7 +1190,7 @@ function showDashboard(button){
         html += `
             <div class="file-row">
                 <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">file · ${escapeHtml(info.size || "")} · by ${escapeHtml(info.owner || "unknown")}</div>
+                <div class="meta">file · ${escapeHtml(info.size || "")} · by ${profileSpan(info.owner || "unknown")}</div>
                 <div class="action-row">
                     <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
                     ${info.owner_email === userEmail ? deleteFileForm(file) : ""}
@@ -1259,7 +1203,7 @@ function showDashboard(button){
         html += `
             <div class="topic-row">
                 <div class="topic-title">${escapeHtml(topic.title)}</div>
-                <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
+                <div class="topic-meta">by ${profileSpan(topic.author)} · ${topic.comments.length} comments</div>
                 <div class="action-row">
                     <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
                     ${topic.author_email === userEmail ? deleteTopicForm(topic.id) : ""}
@@ -1268,9 +1212,7 @@ function showDashboard(button){
         `;
     });
 
-    html += `
-        </div>
-    `;
+    html += `</div>`;
 
     fadeChange(html);
 }
@@ -1301,7 +1243,7 @@ function showFiles(button){
         html+=`
             <div class="file-row" data-name="${escapeAttr(file.toLowerCase())}">
                 <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">${escapeHtml(info.size || "")} · by ${escapeHtml(info.owner || "unknown")}</div>
+                <div class="meta">${escapeHtml(info.size || "")} · by ${profileSpan(info.owner || "unknown")}</div>
                 <div class="action-row">
                     <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
                     ${info.owner_email === userEmail ? deleteFileForm(file) : ""}
@@ -1363,7 +1305,7 @@ function showDiscussion(button){
         html+=`
             <div class="topic-row" data-name="${escapeAttr(searchable)}">
                 <div class="topic-title">${escapeHtml(topic.title)}</div>
-                <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
+                <div class="topic-meta">by ${profileSpan(topic.author)} · ${topic.comments.length} comments</div>
                 <div class="small">${escapeHtml(topic.body).slice(0,140)}${topic.body.length > 140 ? "..." : ""}</div>
                 <div class="action-row">
                     <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
@@ -1410,7 +1352,7 @@ function openTopic(topicId){
 
     let html=`
         <div class="page-title">${escapeHtml(topic.title)}</div>
-        <div class="page-sub">by ${escapeHtml(topic.author)}</div>
+        <div class="page-sub">by ${profileSpan(topic.author)}</div>
 
         <div class="action-row">
             <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">back</button>
@@ -1432,7 +1374,7 @@ function openTopic(topicId){
     topic.comments.forEach(comment=>{
         html+=`
             <div class="comment-row">
-                <div class="comment-meta">${escapeHtml(comment.author)}</div>
+                <div class="comment-meta">${profileSpan(comment.author)}</div>
                 <div class="small">${escapeHtml(comment.body).replaceAll("\\n","<br>")}</div>
             </div>
         `;
@@ -1453,6 +1395,151 @@ function openTopic(topicId){
     fadeChange(html);
 }
 
+function showProfileByUsername(profileUsername){
+    const profile = profiles.find(p => p.username.toLowerCase() === String(profileUsername).toLowerCase());
+
+    clearActive();
+
+    if(!profile){
+        fadeChange(`
+            <div class="page-title">profile not found</div>
+            <div class="page-sub">This user does not exist.</div>
+        `);
+        return;
+    }
+
+    setUrl("profile", null, profile.username);
+
+    const userFiles = files.filter(file => {
+        const info = fileInfo[file] || {};
+        return info.owner === profile.username;
+    });
+
+    const userTopics = discussions.filter(topic => topic.author === profile.username);
+
+    let userComments = 0;
+    discussions.forEach(topic=>{
+        topic.comments.forEach(comment=>{
+            if(comment.author === profile.username) userComments++;
+        });
+    });
+
+    let html = `
+        <div class="profile-head">
+            ${avatarHtml(profile)}
+            <div>
+                <div class="page-title">${escapeHtml(profile.username)}</div>
+                <div class="page-sub">${profile.description ? escapeHtml(profile.description).replaceAll("\\n","<br>") : "No description."}</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-label">files</div>
+                <div class="card-number">${userFiles.length}</div>
+                <div class="card-text">Uploaded files.</div>
+            </div>
+
+            <div class="card">
+                <div class="card-label">posts</div>
+                <div class="card-number">${userTopics.length}</div>
+                <div class="card-text">Created posts.</div>
+            </div>
+
+            <div class="card">
+                <div class="card-label">comments</div>
+                <div class="card-number">${userComments}</div>
+                <div class="card-text">Written comments.</div>
+            </div>
+        </div>
+
+        <div class="line">
+            <div class="topic-title">files</div>
+            <br>
+    `;
+
+    if(userFiles.length === 0){
+        html += `<div class="small">No files.</div>`;
+    }
+
+    userFiles.forEach(file=>{
+        const info = fileInfo[file] || {};
+        html += `
+            <div class="file-row">
+                <div class="file-title">${escapeHtml(file)}</div>
+                <div class="meta">${escapeHtml(info.size || "")}</div>
+                <div class="action-row">
+                    <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
+                </div>
+            </div>
+        `;
+    });
+
+    html += `
+            <br>
+            <div class="topic-title">posts</div>
+            <br>
+    `;
+
+    if(userTopics.length === 0){
+        html += `<div class="small">No posts.</div>`;
+    }
+
+    userTopics.forEach(topic=>{
+        html += `
+            <div class="topic-row">
+                <div class="topic-title">${escapeHtml(topic.title)}</div>
+                <div class="topic-meta">${topic.comments.length} comments</div>
+                <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
+            </div>
+        `;
+    });
+
+    html += `</div>`;
+
+    fadeChange(html);
+}
+
+function showNotifications(button){
+    clickEffect(button);
+    clearActive();
+    if(button) button.classList.add("active");
+
+    setUrl("notifications");
+
+    let html = `
+        <div class="page-title">notifications</div>
+        <div class="page-sub">Profile views, comments, downloads and account activity.</div>
+
+        <div class="line">
+    `;
+
+    if(notifications.length === 0){
+        html += `<div class="small">No notifications yet.</div>`;
+    }
+
+    notifications.forEach(n=>{
+        html += `
+            <div class="notification-row">
+                <div class="topic-title">${escapeHtml(n.message)}</div>
+                <div class="meta">${escapeHtml(timeText(n.created))}</div>
+            </div>
+        `;
+    });
+
+    html += `
+        </div>
+
+        <div class="form-box">
+            <form action="/clear-notifications" method="POST" onsubmit="return confirm('Clear notifications?');">
+                <button class="delete-btn" type="submit">clear notifications</button>
+            </form>
+        </div>
+    `;
+
+    fadeChange(html);
+}
+
 function showAccount(button){
     clickEffect(button);
     clearActive();
@@ -1460,14 +1547,35 @@ function showAccount(button){
 
     setUrl("account");
 
+    const myProfile = profiles.find(p => p.username === username) || {};
+
     let html=`
         <div class="page-title">account</div>
         <div class="page-sub">Edit your account.</div>
 
         <div class="line">
             <div class="account-box">
-                <div class="login-card-title">${escapeHtml(username)}</div>
-                <div class="login-card-sub">${escapeHtml(userEmail)}</div>
+                <div class="profile-head">
+                    ${avatarHtml(myProfile)}
+                    <div>
+                        <div class="login-card-title">${escapeHtml(username)}</div>
+                        <div class="login-card-sub">${escapeHtml(userEmail)}</div>
+                    </div>
+                </div>
+
+                <div class="account-section">
+                    <div class="topic-title">profile</div>
+                    <br>
+                    <form action="/update-profile" method="POST" enctype="multipart/form-data">
+                        <textarea name="description" placeholder="profile description">${escapeHtml(myProfile.description || "")}</textarea>
+                        <br><br>
+                        <input id="profilePicInput" type="file" name="profile_pic" accept=".png,.jpg,.jpeg,.webp" hidden>
+                        <label for="profilePicInput" class="file-button">select profile picture</label>
+                        <span id="profilePicName" class="selected-file">no picture selected</span>
+                        <br><br>
+                        <button class="login-btn primary-btn" type="submit">save profile</button>
+                    </form>
+                </div>
 
                 <div class="account-section">
                     <div class="topic-title">change username</div>
@@ -1592,6 +1700,10 @@ window.addEventListener("load", ()=>{
             showDiscussion(document.getElementById("menuDiscussion"));
         }else if(startView === "topic" && startTopicId){
             openTopic(startTopicId);
+        }else if(startView === "profile" && startProfileUsername){
+            showProfileByUsername(startProfileUsername);
+        }else if(startView === "notifications"){
+            showNotifications(document.getElementById("menuNotifications"));
         }else if(startView === "account"){
             showAccount(document.getElementById("menuAccount"));
         }else if(startView === "credits"){
@@ -1613,17 +1725,20 @@ def home():
     logged_in = bool(current_user())
     requested_view = request.args.get("view", "")
     requested_topic = request.args.get("id", "")
+    requested_profile = request.args.get("u", "")
 
     if not logged_in:
         auth_mode = "register" if requested_view == "register" else "login"
         requested_view = "login"
         requested_topic = ""
+        requested_profile = ""
     else:
         auth_mode = ""
         if requested_view in ["login", "register", ""]:
             requested_view = "dashboard"
 
     files = get_files() if logged_in else []
+    notifications = get_my_notifications() if logged_in else []
 
     return render_template_string(
         HTML,
@@ -1631,12 +1746,45 @@ def home():
         file_info=get_file_info(files),
         credits=CREDITS,
         discussions=load_discussions() if logged_in else [],
+        profiles=get_public_profiles() if logged_in else [],
+        notifications=notifications,
+        notification_count=len(notifications),
         user_email=current_user(),
         username=current_username(),
+        current_profile=get_current_profile() if logged_in else {},
         start_view=requested_view,
         start_topic_id=requested_topic,
+        start_profile_username=requested_profile,
         auth_mode=auth_mode
     )
+
+
+@app.route("/profile-pic/<path:filename>")
+@login_required
+def profile_pic(filename):
+    filename = secure_filename(filename)
+    return send_from_directory(os.path.abspath(PROFILE_PICS_FOLDER), filename)
+
+
+@app.route("/profile/<username>")
+@login_required
+def profile(username):
+    target_email, target_user = get_user_by_username(username)
+
+    if not target_user:
+        flash("Profile not found.", "error")
+        return go("dashboard")
+
+    if target_email != current_user():
+        add_notification(
+            owner_email=target_email,
+            notif_type="profile_view",
+            message=f"{current_username()} viewed your profile.",
+            from_email=current_user(),
+            from_username=current_username()
+        )
+
+    return redirect(url_for("home", view="profile", u=target_user.get("username", username)))
 
 
 @app.route("/register", methods=["POST"])
@@ -1670,6 +1818,8 @@ def register():
     users[email] = {
         "username": username,
         "password_hash": generate_password_hash(password),
+        "description": "",
+        "profile_pic": "",
         "created": int(time.time())
     }
 
@@ -1708,6 +1858,48 @@ def logout():
     session.clear()
     flash("Logged out.", "success")
     return redirect(url_for("home", view="login"))
+
+
+@app.route("/update-profile", methods=["POST"])
+@login_required
+def update_profile():
+    email = current_user()
+    users = load_users()
+    user = users.get(email)
+
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
+    description = request.form.get("description", "").strip()[:600]
+    user["description"] = description
+
+    pic = request.files.get("profile_pic")
+
+    if pic and pic.filename:
+        if not allowed_profile_pic(pic.filename):
+            flash("Profile picture must be PNG, JPG, JPEG, or WEBP.", "error")
+            return go("account")
+
+        ext = os.path.splitext(pic.filename.lower())[1]
+        new_filename = secure_filename(f"{secrets.token_hex(12)}{ext}")
+        save_path = os.path.join(PROFILE_PICS_FOLDER, new_filename)
+
+        old_pic = user.get("profile_pic", "")
+        if old_pic:
+            old_path = os.path.join(PROFILE_PICS_FOLDER, secure_filename(old_pic))
+            if os.path.exists(old_path):
+                os.remove(old_path)
+
+        pic.save(save_path)
+        user["profile_pic"] = new_filename
+
+    users[email] = user
+    save_users(users)
+
+    flash("Profile updated.", "success")
+    return go("account")
 
 
 @app.route("/change-username", methods=["POST"])
@@ -1822,6 +2014,19 @@ def download(filename):
         flash("File not found on server.", "error")
         return go("files")
 
+    meta = load_files_meta()
+    file_data = meta.get(filename, {})
+
+    if file_data.get("owner_email") and file_data.get("owner_email") != current_user():
+        add_notification(
+            owner_email=file_data.get("owner_email"),
+            notif_type="download",
+            message=f"{current_username()} downloaded your file: {filename}",
+            from_email=current_user(),
+            from_username=current_username(),
+            extra={"filename": filename}
+        )
+
     return send_from_directory(
         os.path.abspath(UPLOAD_FOLDER),
         filename,
@@ -1915,6 +2120,8 @@ def add_comment(topic_id):
 
     discussions = load_discussions()
     found = False
+    topic_owner_email = ""
+    topic_title = ""
 
     for topic in discussions:
         if topic["id"] == topic_id:
@@ -1924,17 +2131,41 @@ def add_comment(topic_id):
                 "body": body[:2000],
                 "time": int(time.time())
             })
+            topic_owner_email = topic.get("author_email", "")
+            topic_title = topic.get("title", "")
             found = True
             break
 
     save_discussions(discussions)
 
     if found:
+        if topic_owner_email and topic_owner_email != current_user():
+            add_notification(
+                owner_email=topic_owner_email,
+                notif_type="comment",
+                message=f"{current_username()} commented on your post: {topic_title}",
+                from_email=current_user(),
+                from_username=current_username(),
+                extra={"topic_id": topic_id}
+            )
+
         flash("Comment added.", "success")
         return go("topic", topic_id)
 
     flash("Post not found.", "error")
     return go("discussion")
+
+
+@app.route("/clear-notifications", methods=["POST"])
+@login_required
+def clear_notifications():
+    email = current_user()
+    notifications = load_notifications()
+    notifications = [n for n in notifications if n.get("owner_email") != email]
+    save_notifications(notifications)
+
+    flash("Notifications cleared.", "success")
+    return go("notifications")
 
 
 @app.errorhandler(413)
