@@ -14,9 +14,14 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 DATA_FOLDER = "data"
 
-USERS_FILE = os.path.join(DATA_FOLDER, "users.json.gz")
-DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json.gz")
-FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json.gz")
+USERS_FILE = os.path.join(DATA_FOLDER, "users.json")
+DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json")
+FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json")
+
+OLD_USERS_FILE = os.path.join(DATA_FOLDER, "users.json.gz")
+OLD_DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json.gz")
+OLD_FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json.gz")
+
 SECRET_FILE = os.path.join(DATA_FOLDER, "secret_key.txt")
 
 MAX_FILE_SIZE = 1024 * 1024 * 1024
@@ -67,44 +72,74 @@ CREDITS = {
 }
 
 
-def load_json_gz(path, default):
+def migrate_gz_to_json(json_path, gz_path, default):
+    if os.path.exists(json_path):
+        return
+
+    if not os.path.exists(gz_path):
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(default, f, indent=4, ensure_ascii=False)
+        return
+
+    try:
+        with gzip.open(gz_path, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+
+        print(f"Migrated {gz_path} -> {json_path}")
+
+    except Exception as e:
+        print(f"Could not migrate {gz_path}: {e}")
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(default, f, indent=4, ensure_ascii=False)
+
+
+def load_json(path, default):
     if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(default, f, indent=4, ensure_ascii=False)
         return default
 
     try:
-        with gzip.open(path, "rt", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return default
 
 
-def save_json_gz(path, data):
-    with gzip.open(path, "wt", encoding="utf-8") as f:
-        json.dump(data, f, separators=(",", ":"))
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 
 def load_users():
-    return load_json_gz(USERS_FILE, {})
+    migrate_gz_to_json(USERS_FILE, OLD_USERS_FILE, {})
+    return load_json(USERS_FILE, {})
 
 
 def save_users(users):
-    save_json_gz(USERS_FILE, users)
+    save_json(USERS_FILE, users)
 
 
 def load_discussions():
-    return load_json_gz(DISCUSSION_FILE, [])
+    migrate_gz_to_json(DISCUSSION_FILE, OLD_DISCUSSION_FILE, [])
+    return load_json(DISCUSSION_FILE, [])
 
 
 def save_discussions(data):
-    save_json_gz(DISCUSSION_FILE, data)
+    save_json(DISCUSSION_FILE, data)
 
 
 def load_files_meta():
-    return load_json_gz(FILES_META_FILE, {})
+    migrate_gz_to_json(FILES_META_FILE, OLD_FILES_META_FILE, {})
+    return load_json(FILES_META_FILE, {})
 
 
 def save_files_meta(data):
-    save_json_gz(FILES_META_FILE, data)
+    save_json(FILES_META_FILE, data)
 
 
 def current_user():
