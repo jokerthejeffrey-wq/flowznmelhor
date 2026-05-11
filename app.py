@@ -13,8 +13,9 @@ from flask_mail import Mail, Message
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "uploads"
-DATA_FOLDER = "data"
+UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "uploads")
+DATA_FOLDER = os.environ.get("DATA_FOLDER", "data")
+
 USERS_FILE = os.path.join(DATA_FOLDER, "users.json.gz")
 DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json.gz")
 SECRET_FILE = os.path.join(DATA_FOLDER, "secret_key.txt")
@@ -27,6 +28,9 @@ os.makedirs(DATA_FOLDER, exist_ok=True)
 
 
 def get_or_create_secret_key():
+    if os.environ.get("SECRET_KEY"):
+        return os.environ.get("SECRET_KEY")
+
     if os.path.exists(SECRET_FILE):
         with open(SECRET_FILE, "r", encoding="utf-8") as f:
             key = f.read().strip()
@@ -55,10 +59,25 @@ app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "")
 
 mail = Mail(app)
 
-CREDITS = [
-    "FlowZNmelhor",
-    "Your Name Here"
-]
+CREDITS = {
+    "OWNERS": [
+        "DJ TUTTER",
+        "DJ LIRA DA ZL"
+    ],
+    "MEMBERS": [
+        "DJ FRG 011",
+        "DJ PLT 011",
+        "DJ RGLX",
+        "DJ RDC",
+        "DJ SABA 7",
+        "DJ RE7 013",
+        "RSFI",
+        "DJ RDC"
+    ],
+    "WEBSITE MADE BY": [
+        "DJ SABA 7"
+    ]
+}
 
 
 def go(view="home", topic_id=None):
@@ -465,6 +484,19 @@ button:hover,.file-button:hover{
     margin-top:28px;
     padding-top:22px;
     border-top:1px solid #222;
+}
+
+.credit-heading{
+    color:#fff;
+    font-size:15px;
+    letter-spacing:2px;
+    margin-bottom:18px;
+}
+
+.credit-divider{
+    border-top:1px solid #333;
+    width:280px;
+    margin:24px 0;
 }
 </style>
 </head>
@@ -891,9 +923,39 @@ function showCredits(button){
 
     setUrl("credits");
 
-    let html=`<div class="page-title">credits</div><div class="line">`;
+    let html=`
+        <div class="page-title">credits</div>
+        <div class="line">
+            <div class="credit-heading">OWNERS</div>
+    `;
 
-    credits.forEach(person=>{
+    credits["OWNERS"].forEach(person=>{
+        html+=`
+            <div class="credit-row">
+                <div class="credit-name">${escapeHtml(person)}</div>
+            </div>
+        `;
+    });
+
+    html+=`
+        <div class="credit-divider"></div>
+        <div class="credit-heading">MEMBERS</div>
+    `;
+
+    credits["MEMBERS"].forEach(person=>{
+        html+=`
+            <div class="credit-row">
+                <div class="credit-name">${escapeHtml(person)}</div>
+            </div>
+        `;
+    });
+
+    html+=`
+        <div class="credit-divider"></div>
+        <div class="credit-heading">WEBSITE MADE BY</div>
+    `;
+
+    credits["WEBSITE MADE BY"].forEach(person=>{
         html+=`
             <div class="credit-row">
                 <div class="credit-name">${escapeHtml(person)}</div>
@@ -1234,12 +1296,17 @@ def upload():
     return go("files")
 
 
-@app.route("/download/<filename>")
+@app.route("/download/<path:filename>")
 def download(filename):
     filename = secure_filename(filename)
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+
+    if not os.path.exists(file_path):
+        flash("File not found on server. It may have been deleted after restart.", "error")
+        return go("files")
 
     return send_from_directory(
-        UPLOAD_FOLDER,
+        os.path.abspath(UPLOAD_FOLDER),
         filename,
         as_attachment=True
     )
