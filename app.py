@@ -44,8 +44,7 @@ app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
 CREDITS = [
-    "FlowZNmelhor",
-    "Your Name Here"
+    "FlowZNmelhor Members",
 ]
 
 
@@ -183,7 +182,9 @@ HTML = """
 <title>FlowZNmelhor</title>
 
 <style>
-*{box-sizing:border-box}
+*{
+    box-sizing:border-box;
+}
 
 body{
     margin:0;
@@ -210,7 +211,9 @@ body{
     margin-bottom:34px;
 }
 
-.menu-main{flex:1}
+.menu-main{
+    flex:1;
+}
 
 .menu-bottom{
     border-top:1px solid #222;
@@ -230,12 +233,24 @@ body{
     transform:translateX(5px);
 }
 
-.clicked{animation:clickFade .35s ease}
+.clicked{
+    animation:clickFade .35s ease;
+}
 
 @keyframes clickFade{
-    0%{opacity:1}
-    40%{opacity:.35;transform:translateX(8px)}
-    100%{opacity:1;transform:translateX(5px)}
+    0%{
+        opacity:1;
+    }
+
+    40%{
+        opacity:.35;
+        transform:translateX(8px);
+    }
+
+    100%{
+        opacity:1;
+        transform:translateX(5px);
+    }
 }
 
 .content{
@@ -272,7 +287,9 @@ input,textarea{
     font-size:14px;
 }
 
-input:focus,textarea:focus{border-color:#777}
+input:focus,textarea:focus{
+    border-color:#777;
+}
 
 textarea{
     width:100%;
@@ -390,7 +407,9 @@ button:hover,.file-button:hover{
     border-radius:0;
 }
 
-.back-btn{margin-top:8px}
+.back-btn{
+    margin-top:8px;
+}
 
 .selected-file{
     color:#666;
@@ -481,6 +500,7 @@ const startTopicId = {{ start_topic_id|tojson }};
 
 function clickEffect(el){
     if(!el) return;
+
     el.classList.remove("clicked");
     void el.offsetWidth;
     el.classList.add("clicked");
@@ -512,10 +532,20 @@ function clearActive(){
     document.querySelectorAll(".item").forEach(i=>i.classList.remove("active"));
 }
 
+function setUrl(view, topicId=null){
+    if(view === "topic" && topicId){
+        window.history.replaceState(null, "", "/?view=topic&id=" + encodeURIComponent(topicId));
+    }else{
+        window.history.replaceState(null, "", "/?view=" + encodeURIComponent(view));
+    }
+}
+
 function showFiles(button){
     clickEffect(button);
     clearActive();
     if(button) button.classList.add("active");
+
+    setUrl("files");
 
     let html=`
         <div class="page-title">files</div>
@@ -579,6 +609,8 @@ function showLogin(button){
     clickEffect(button);
     clearActive();
     if(button) button.classList.add("active");
+
+    setUrl("login");
 
     let html=`<div class="page-title">login</div><div class="line">`;
 
@@ -659,6 +691,8 @@ function showAccount(button){
     clearActive();
     if(button) button.classList.add("active");
 
+    setUrl("account");
+
     let html=`
         <div class="page-title">account</div>
         <div class="line">
@@ -703,6 +737,8 @@ function showDiscussion(button){
     clickEffect(button);
     clearActive();
     if(button) button.classList.add("active");
+
+    setUrl("discussion");
 
     let html=`
         <div class="page-title">discussion</div>
@@ -763,12 +799,17 @@ function openTopic(topicId){
     const topic=discussions.find(t=>t.id===topicId);
     if(!topic) return;
 
+    setUrl("topic", topicId);
+
     clearActive();
     const discussionButton=document.getElementById("menuDiscussion");
     if(discussionButton) discussionButton.classList.add("active");
 
     let html=`
         <div class="page-title">${escapeHtml(topic.title)}</div>
+        <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">back to discussion</button>
+        <br><br>
+
         <div class="line">
             <div class="topic-meta">by ${escapeHtml(topic.author)}</div>
             <br>
@@ -811,6 +852,8 @@ function showCredits(button){
     clickEffect(button);
     clearActive();
     if(button) button.classList.add("active");
+
+    setUrl("credits");
 
     let html=`<div class="page-title">credits</div><div class="line">`;
 
@@ -856,6 +899,8 @@ window.addEventListener("load", ()=>{
             }
         }else if(startView === "login"){
             showLogin(document.getElementById("menuLogin"));
+        }else if(startView === "credits"){
+            showCredits(document.getElementById("menuCredits"));
         }
     },100);
 });
