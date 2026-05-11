@@ -2,3 +2,4 @@ Flask
 Werkzeug
 Flask-Mail
 gunicorn
+requests
