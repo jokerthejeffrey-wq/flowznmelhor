@@ -3,18 +3,16 @@ import json
 import gzip
 import time
 import secrets
-import random
 from functools import wraps
 
 from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory, session, flash
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask_mail import Mail, Message
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "uploads")
-DATA_FOLDER = os.environ.get("DATA_FOLDER", "data")
+UPLOAD_FOLDER = "uploads"
+DATA_FOLDER = "data"
 
 USERS_FILE = os.path.join(DATA_FOLDER, "users.json.gz")
 DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json.gz")
@@ -25,12 +23,10 @@ ALLOWED_EXTENSIONS = {".zip", ".mp3"}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DATA_FOLDER, exist_ok=True)
+os.makedirs("static", exist_ok=True)
 
 
 def get_or_create_secret_key():
-    if os.environ.get("SECRET_KEY"):
-        return os.environ.get("SECRET_KEY")
-
     if os.path.exists(SECRET_FILE):
         with open(SECRET_FILE, "r", encoding="utf-8") as f:
             key = f.read().strip()
@@ -49,15 +45,6 @@ app.secret_key = get_or_create_secret_key()
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
-app.config["MAIL_SERVER"] = os.environ.get("MAIL_SERVER", "smtp.gmail.com")
-app.config["MAIL_PORT"] = int(os.environ.get("MAIL_PORT", "587"))
-app.config["MAIL_USE_TLS"] = True
-app.config["MAIL_USE_SSL"] = False
-app.config["MAIL_USERNAME"] = os.environ.get("MAIL_USERNAME", "")
-app.config["MAIL_PASSWORD"] = os.environ.get("MAIL_PASSWORD", "")
-app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "")
-
-mail = Mail(app)
 
 CREDITS = {
     "OWNERS": [
@@ -80,38 +67,6 @@ CREDITS = {
 }
 
 
-def go(view="home", topic_id=None):
-    if topic_id:
-        return redirect(url_for("home", view=view, id=topic_id))
-    return redirect(url_for("home", view=view))
-
-
-def make_code():
-    return str(random.randint(1000, 9999))
-
-
-def send_code_email(email, code):
-    body = f"""Your code: {code}
-
-If this was not sent by you, ignore it."""
-
-    if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"]:
-        print("\nEMAIL NOT CONFIGURED")
-        print("To:", email)
-        print(body)
-        print()
-        return False
-
-    msg = Message(
-        subject="Your verification code",
-        recipients=[email],
-        body=body
-    )
-
-    mail.send(msg)
-    return True
-
-
 def load_json_gz(path, default):
     if not os.path.exists(path):
         return default
@@ -119,7 +74,7 @@ def load_json_gz(path, default):
     try:
         with gzip.open(path, "rt", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return default
 
 
@@ -159,6 +114,21 @@ def current_username():
     return user.get("username", email)
 
 
+def valid_username(username):
+    username = username.strip()
+
+    if len(username) < 3 or len(username) > 20:
+        return False
+
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_."
+
+    for char in username:
+        if char not in allowed:
+            return False
+
+    return True
+
+
 def username_exists(username, ignore_email=None):
     username = username.strip().lower()
     users = load_users()
@@ -171,24 +141,6 @@ def username_exists(username, ignore_email=None):
             return True
 
     return False
-
-
-def valid_username(username):
-    username = username.strip()
-
-    if len(username) < 3:
-        return False
-
-    if len(username) > 20:
-        return False
-
-    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_."
-
-    for char in username:
-        if char not in allowed:
-            return False
-
-    return True
 
 
 def update_author_name(old_email, new_username):
@@ -205,17 +157,6 @@ def update_author_name(old_email, new_username):
     save_discussions(discussions)
 
 
-def login_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        if not current_user():
-            flash("Please login first.", "error")
-            return go("login")
-        return func(*args, **kwargs)
-
-    return wrapper
-
-
 def allowed_file(filename):
     ext = os.path.splitext(filename.lower())[1]
     return ext in ALLOWED_EXTENSIONS
@@ -230,7 +171,55 @@ def get_files():
         if os.path.isfile(full) and allowed_file(file):
             data.append(file)
 
-    return sorted(data)
+    return sorted(data, reverse=True)
+
+
+def file_size_text(filename):
+    path = os.path.join(UPLOAD_FOLDER, filename)
+
+    if not os.path.exists(path):
+        return "0 KB"
+
+    size = os.path.getsize(path)
+
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+
+    return f"{size / 1024:.1f} KB"
+
+
+def login_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not current_user():
+            flash("Please login first.", "error")
+            return redirect(url_for("home", view="login"))
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@app.before_request
+def block_guest_actions():
+    allowed_endpoints = {
+        "home",
+        "login",
+        "register",
+        "static"
+    }
+
+    if request.endpoint in allowed_endpoints:
+        return
+
+    if not current_user():
+        flash("Please login first.", "error")
+        return redirect(url_for("home", view="login"))
+
+
+def go(view="dashboard", topic_id=None):
+    if topic_id:
+        return redirect(url_for("home", view=view, id=topic_id))
+    return redirect(url_for("home", view=view))
 
 
 HTML = """
@@ -238,68 +227,370 @@ HTML = """
 <html>
 <head>
 <title>FlowZNmelhor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
-*{box-sizing:border-box}
+*{
+    box-sizing:border-box;
+}
+
+:root{
+    --white:#ffffff;
+    --text:#f7fbff;
+    --muted:rgba(255,255,255,.72);
+    --soft:rgba(255,255,255,.54);
+    --blue:#9fe7ff;
+    --blue2:#4eb8ff;
+    --dark:#06101d;
+    --panel:rgba(3,13,24,.74);
+    --panel2:rgba(0,0,0,.34);
+    --line:rgba(255,255,255,.26);
+    --line2:rgba(255,255,255,.14);
+}
 
 body{
     margin:0;
-    background:#070707;
-    color:#e6e6e6;
-    font-family:Arial,sans-serif;
+    min-height:100vh;
+    color:var(--text);
+    font-family:Arial,Helvetica,sans-serif;
+    background:
+        linear-gradient(rgba(2,8,16,.70), rgba(2,8,16,.84)),
+        radial-gradient(circle at 18% 18%, rgba(125,215,255,.34), transparent 28%),
+        radial-gradient(circle at 84% 78%, rgba(43,110,190,.32), transparent 35%),
+        url("/static/bg.png");
+    background-size:cover;
+    background-position:center;
+    overflow:hidden;
+}
+
+body::before{
+    content:"";
+    position:fixed;
+    inset:0;
+    background-image:
+        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+    background-size:24px 24px;
+    opacity:.65;
+    pointer-events:none;
+    z-index:0;
+}
+
+body::after{
+    content:"";
+    position:fixed;
+    width:420px;
+    height:420px;
+    right:-150px;
+    top:-160px;
+    background:rgba(159,231,255,.17);
+    filter:blur(35px);
+    border-radius:50%;
+    pointer-events:none;
+    z-index:0;
+}
+
+.app{
+    position:relative;
+    z-index:1;
     height:100vh;
     display:flex;
+    padding:16px;
+    gap:16px;
+}
+
+.login-only{
+    height:100vh;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    padding:20px;
+}
+
+.login-shell{
+    width:370px;
+    background:rgba(220,245,255,.20);
+    border:1px solid rgba(255,255,255,.42);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+    box-shadow:0 28px 80px rgba(0,0,0,.50);
+    border-radius:6px;
+    padding:32px;
+    position:relative;
     overflow:hidden;
+}
+
+.login-shell::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    background:
+        linear-gradient(120deg, rgba(255,255,255,.32), transparent 42%),
+        radial-gradient(circle at 20% 0%, rgba(255,255,255,.20), transparent 35%);
+    pointer-events:none;
+}
+
+.login-inner{
+    position:relative;
+    z-index:2;
+}
+
+.login-logo{
+    font-size:12px;
+    letter-spacing:3px;
+    font-weight:900;
+    color:white;
+    margin-bottom:28px;
+}
+
+.login-logo::after{
+    content:"";
+    display:block;
+    width:46px;
+    height:2px;
+    background:var(--blue);
+    margin-top:12px;
+}
+
+.login-title{
+    font-size:30px;
+    font-weight:900;
+    color:white;
+    margin-bottom:8px;
+    letter-spacing:-1px;
+    text-shadow:0 3px 18px rgba(0,0,0,.40);
+}
+
+.login-sub{
+    color:rgba(255,255,255,.76);
+    font-size:14px;
+    line-height:1.6;
+    margin-bottom:26px;
+}
+
+.login-input-wrap{
+    position:relative;
+    margin-bottom:16px;
+}
+
+.login-input-wrap input{
+    width:100%;
+    background:transparent;
+    border:none;
+    border-bottom:1px solid rgba(255,255,255,.70);
+    color:white;
+    outline:none;
+    padding:13px 32px 11px 0;
+    font-size:14px;
+    font-weight:700;
+}
+
+.login-input-wrap input::placeholder{
+    color:rgba(255,255,255,.70);
+    font-weight:500;
+}
+
+.login-icon{
+    position:absolute;
+    right:2px;
+    top:12px;
+    color:white;
+    font-size:14px;
+    opacity:.9;
+}
+
+.login-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    color:rgba(255,255,255,.74);
+    font-size:12px;
+    margin:6px 0 22px;
+}
+
+.login-row input{
+    accent-color:white;
+}
+
+.btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:100%;
+    height:44px;
+    border-radius:4px;
+    border:1px solid rgba(255,255,255,.28);
+    cursor:pointer;
+    transition:.18s ease;
+    font-weight:900;
+    font-size:14px;
+    text-decoration:none;
+}
+
+.btn-dark{
+    background:#06101d;
+    color:white;
+}
+
+.btn-dark:hover{
+    background:#102b43;
+    border-color:var(--blue);
+    transform:translateY(-1px);
+}
+
+.btn-white{
+    background:white;
+    color:#06101d;
+    border-color:white;
+}
+
+.btn-white:hover{
+    background:#e9f8ff;
+    transform:translateY(-1px);
+}
+
+.login-line{
+    height:1px;
+    background:rgba(255,255,255,.30);
+    margin:18px 0 14px;
+}
+
+.switch-text{
+    color:rgba(255,255,255,.78);
+    text-align:center;
+    font-size:13px;
+    margin-top:18px;
+}
+
+.switch-text a{
+    color:white;
+    font-weight:900;
+    text-decoration:none;
+}
+
+.alert-box,
+.success-box{
+    padding:12px 14px;
+    margin-bottom:18px;
+    font-size:14px;
+    border-radius:4px;
+}
+
+.alert-box{
+    background:rgba(80,0,0,.55);
+    color:#ffdede;
+    border:1px solid rgba(255,90,90,.46);
+    border-left:3px solid #ff5757;
+}
+
+.success-box{
+    background:rgba(0,70,30,.48);
+    color:#d6ffe1;
+    border:1px solid rgba(67,232,139,.44);
+    border-left:3px solid #43e88b;
 }
 
 .side{
     width:260px;
-    padding:30px 22px;
-    border-right:1px solid #1f1f1f;
+    padding:28px 20px;
+    border:1px solid var(--line);
+    background:var(--panel);
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+    box-shadow:0 22px 60px rgba(0,0,0,.45);
     display:flex;
     flex-direction:column;
+    border-radius:6px;
 }
 
 .title{
-    font-size:13px;
-    letter-spacing:2px;
-    color:#666;
+    font-size:12px;
+    letter-spacing:3px;
+    color:white;
     margin-bottom:34px;
+    font-weight:900;
 }
 
-.menu-main{flex:1}
+.title::after{
+    content:"";
+    display:block;
+    width:42px;
+    height:2px;
+    background:var(--blue);
+    margin-top:12px;
+}
+
+.user-mini{
+    background:rgba(255,255,255,.08);
+    border:1px solid rgba(255,255,255,.14);
+    border-radius:4px;
+    padding:12px;
+    margin-bottom:24px;
+}
+
+.user-mini-name{
+    color:white;
+    font-weight:900;
+    font-size:14px;
+}
+
+.user-mini-mail{
+    color:var(--muted);
+    font-size:12px;
+    margin-top:4px;
+    word-break:break-all;
+}
+
+.menu-main{
+    flex:1;
+}
 
 .menu-bottom{
-    border-top:1px solid #222;
+    border-top:1px solid var(--line2);
     padding-top:18px;
 }
 
 .item{
     cursor:pointer;
     user-select:none;
-    transition:.25s ease;
-    line-height:2.1;
-    color:#aaa;
+    transition:.18s ease;
+    line-height:2.35;
+    color:rgba(255,255,255,.76);
+    padding:2px 10px;
+    margin-bottom:4px;
+    border-radius:4px;
+    font-size:14px;
+    letter-spacing:.4px;
 }
 
-.item:hover,.item.active{
+.item:hover,
+.item.active{
     color:white;
-    transform:translateX(5px);
+    background:rgba(255,255,255,.13);
+    transform:translateX(4px);
 }
 
-.clicked{animation:clickFade .35s ease}
+.clicked{
+    animation:clickFade .35s ease;
+}
 
 @keyframes clickFade{
     0%{opacity:1}
-    40%{opacity:.35;transform:translateX(8px)}
-    100%{opacity:1;transform:translateX(5px)}
+    40%{opacity:.45;transform:translateX(8px)}
+    100%{opacity:1;transform:translateX(4px)}
 }
 
 .content{
     flex:1;
-    padding:56px;
-    transition:opacity .25s ease,transform .25s ease;
+    padding:42px;
     overflow-y:auto;
+    transition:opacity .25s ease,transform .25s ease;
+    border:1px solid var(--line);
+    background:var(--panel);
+    backdrop-filter:blur(20px);
+    -webkit-backdrop-filter:blur(20px);
+    box-shadow:0 22px 65px rgba(0,0,0,.42);
+    border-radius:6px;
 }
 
 .content.fade{
@@ -307,119 +598,244 @@ body{
     transform:translateY(8px);
 }
 
+.content::-webkit-scrollbar{
+    width:10px;
+}
+
+.content::-webkit-scrollbar-track{
+    background:rgba(255,255,255,.04);
+}
+
+.content::-webkit-scrollbar-thumb{
+    background:rgba(255,255,255,.28);
+    border-radius:4px;
+}
+
 .page-title{
-    font-size:32px;
-    font-weight:normal;
-    margin-bottom:24px;
+    font-size:34px;
+    font-weight:900;
+    margin-bottom:10px;
+    color:white;
+    letter-spacing:-1px;
+    text-shadow:0 2px 14px rgba(0,0,0,.45);
+}
+
+.page-sub{
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
+    margin-bottom:28px;
+}
+
+.grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:16px;
+    margin-bottom:28px;
+}
+
+.card{
+    background:rgba(0,0,0,.34);
+    border:1px solid rgba(255,255,255,.20);
+    border-radius:5px;
+    padding:18px;
+    transition:.18s ease;
+}
+
+.card:hover{
+    background:rgba(0,0,0,.46);
+    border-color:rgba(157,228,255,.58);
+    transform:translateY(-1px);
+}
+
+.card-label{
+    color:var(--muted);
+    font-size:12px;
+    letter-spacing:1.5px;
+    text-transform:uppercase;
+    margin-bottom:10px;
+}
+
+.card-number{
+    color:white;
+    font-size:30px;
+    font-weight:900;
+}
+
+.card-text{
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.6;
+    margin-top:8px;
 }
 
 .line{
-    border-left:1px solid #333;
+    border-left:1px solid rgba(255,255,255,.34);
     padding-left:24px;
-    max-width:900px;
+    max-width:980px;
 }
 
-input,textarea{
-    background:#090909;
-    color:#ddd;
-    border:1px solid #333;
-    padding:12px 14px;
+input,
+textarea{
+    background:rgba(0,0,0,.36);
+    color:white;
+    border:1px solid rgba(255,255,255,.34);
+    padding:13px 14px;
     outline:none;
-    border-radius:0;
+    border-radius:4px;
     font-size:14px;
+    backdrop-filter:blur(10px);
 }
 
-input:focus,textarea:focus{border-color:#777}
+input::placeholder,
+textarea::placeholder{
+    color:rgba(255,255,255,.62);
+}
+
+input:focus,
+textarea:focus{
+    border-color:var(--blue);
+    background:rgba(0,0,0,.48);
+}
 
 textarea{
     width:100%;
-    min-height:90px;
+    min-height:96px;
     resize:vertical;
     margin-top:10px;
 }
 
 .search-bar{
-    width:300px;
-    margin-bottom:28px;
+    width:330px;
+    margin-bottom:26px;
 }
 
-.file-row,.credit-row,.topic-row,.comment-row{
-    margin-bottom:22px;
+.row{
+    margin-bottom:16px;
 }
 
-.file-title,.credit-name,.topic-title{
+.file-row,
+.topic-row,
+.credit-row,
+.comment-row{
+    margin-bottom:16px;
+    padding:16px 18px;
+    background:rgba(0,0,0,.34);
+    border:1px solid rgba(255,255,255,.22);
+    border-radius:5px;
+    transition:.18s ease;
+}
+
+.file-row:hover,
+.topic-row:hover,
+.credit-row:hover,
+.comment-row:hover{
+    background:rgba(0,0,0,.46);
+    border-color:rgba(157,228,255,.58);
+    transform:translateY(-1px);
+}
+
+.file-title,
+.credit-name,
+.topic-title{
     font-size:15px;
-    color:#eee;
-    margin-bottom:6px;
+    color:white;
+    margin-bottom:7px;
+    font-weight:900;
 }
 
-.topic-meta,.comment-meta,.small{
-    color:#777;
+.meta,
+.topic-meta,
+.comment-meta,
+.small{
+    color:var(--muted);
     font-size:14px;
     line-height:1.7;
 }
 
-.file-link,.topic-open{
-    color:#777;
+.file-link,
+.topic-open,
+.fake-link{
+    color:var(--blue);
     text-decoration:none;
     font-size:14px;
     word-break:break-all;
-    transition:.25s ease;
+    transition:.18s ease;
     cursor:pointer;
+    font-weight:900;
 }
 
-.file-link:hover,.topic-open:hover{
+.file-link:hover,
+.topic-open:hover,
+.fake-link:hover{
     color:white;
-    padding-left:6px;
+    padding-left:5px;
 }
 
 .form-box{
-    margin-top:35px;
-    border-left:1px solid #333;
+    margin-top:32px;
+    border-left:1px solid rgba(255,255,255,.34);
     padding-left:24px;
-    max-width:720px;
+    max-width:740px;
 }
 
-button,.file-button{
+button,
+.file-button{
     display:inline-flex;
     align-items:center;
     justify-content:center;
     gap:10px;
-    background:#111;
-    color:#eee;
-    border:1px solid #333;
-    padding:11px 18px;
-    border-radius:0;
+    background:#071827;
+    color:white;
+    border:1px solid rgba(255,255,255,.28);
+    padding:12px 18px;
+    border-radius:4px;
     cursor:pointer;
-    transition:.25s ease;
+    transition:.18s ease;
     font-size:14px;
     text-decoration:none;
+    font-weight:900;
+    backdrop-filter:blur(10px);
 }
 
-button:hover,.file-button:hover{
-    background:#191919;
-    color:white;
-    border-color:#555;
+button:hover,
+.file-button:hover{
+    background:#102b43;
+    border-color:var(--blue);
     transform:translateY(-1px);
 }
 
-.login-card,.account-box{
-    width:420px;
-    background:#080808;
-    border-left:1px solid #333;
-    border-radius:0;
+.primary-btn{
+    background:white;
+    color:#06101d;
+    border-color:white;
+}
+
+.primary-btn:hover{
+    background:#e9f8ff;
+    color:#000;
+}
+
+.login-card,
+.account-box{
+    width:430px;
+    background:rgba(0,0,0,.38);
+    border:1px solid rgba(255,255,255,.28);
+    border-radius:5px;
     padding:28px;
-    box-shadow:none;
+    box-shadow:0 20px 55px rgba(0,0,0,.35);
 }
 
 .login-card-title{
-    font-size:24px;
-    color:#fff;
+    font-size:25px;
+    color:white;
     margin-bottom:8px;
+    font-weight:900;
+    letter-spacing:-.5px;
 }
 
 .login-card-sub{
-    color:#777;
+    color:var(--muted);
     font-size:14px;
     margin-bottom:24px;
 }
@@ -430,118 +846,227 @@ button:hover,.file-button:hover{
     height:46px;
 }
 
-.login-primary{
-    background:#f2f2f2;
-    color:#050505;
-    border-color:#f2f2f2;
-}
-
-.login-primary:hover{
-    background:white;
-    color:#000;
-}
-
 .login-input{
     width:100%;
     margin-bottom:12px;
-    border-radius:0;
 }
 
-.back-btn{margin-top:8px}
-
 .selected-file{
-    color:#666;
+    color:var(--muted);
     font-size:14px;
     margin-left:10px;
 }
 
 .comment-row{
-    border-left:1px solid #252525;
-    padding-left:18px;
-}
-
-.alert-box{
-    background:#140707;
-    color:#ff6b6b;
-    border-left:2px solid #ff3333;
-    padding:12px 16px;
-    margin-bottom:22px;
-    font-size:14px;
-    max-width:420px;
-}
-
-.success-box{
-    background:#071407;
-    color:#67e88b;
-    border-left:2px solid #2ecc71;
-    padding:12px 16px;
-    margin-bottom:22px;
-    font-size:14px;
-    max-width:420px;
+    border-left:1px solid rgba(157,228,255,.42);
 }
 
 .account-section{
     margin-top:28px;
     padding-top:22px;
-    border-top:1px solid #222;
+    border-top:1px solid rgba(255,255,255,.22);
 }
 
 .credit-heading{
-    color:#fff;
-    font-size:15px;
-    letter-spacing:2px;
-    margin-bottom:18px;
+    color:white;
+    font-size:13px;
+    letter-spacing:2.4px;
+    margin:26px 0 16px;
+    font-weight:900;
+}
+
+.credit-heading:first-child{
+    margin-top:0;
 }
 
 .credit-divider{
-    border-top:1px solid #333;
+    border-top:1px solid rgba(255,255,255,.28);
     width:280px;
     margin:24px 0;
+}
+
+.pill-row{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    margin-bottom:28px;
+}
+
+.pill{
+    color:white;
+    background:rgba(255,255,255,.09);
+    border:1px solid rgba(255,255,255,.18);
+    padding:9px 12px;
+    border-radius:4px;
+    font-size:13px;
+    font-weight:800;
+}
+
+@media(max-width:900px){
+    body{
+        overflow:auto;
+    }
+
+    .app{
+        height:auto;
+        min-height:100vh;
+        flex-direction:column;
+    }
+
+    .side{
+        width:100%;
+    }
+
+    .content{
+        padding:28px;
+    }
+
+    .grid{
+        grid-template-columns:1fr;
+    }
+
+    .login-card,
+    .account-box,
+    .search-bar{
+        width:100%;
+    }
 }
 </style>
 </head>
 
 <body>
 
-<div class="side">
-    <div class="title">FLOWZNMELHOR</div>
+{% if not user_email %}
 
-    <div class="menu-main">
-        <div class="item" id="menuFiles" onclick="showFiles(this)">files</div>
-        <div class="item" id="menuDiscussion" onclick="showDiscussion(this)">discussion</div>
-    </div>
+<div class="login-only">
+    <div class="login-shell">
+        <div class="login-inner">
+            <div class="login-logo">FLOWZNMELHOR</div>
 
-    <div class="menu-bottom">
-        {% if user_email %}
-            <div class="item" id="menuAccount" onclick="showAccount(this)">account</div>
-        {% else %}
-            <div class="item" id="menuLogin" onclick="showLogin(this)">login</div>
-        {% endif %}
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% set category = messages[0][0] %}
+                    {% set message = messages[0][1] %}
+                    {% if category == "success" %}
+                        <div class="success-box">{{ message }}</div>
+                    {% else %}
+                        <div class="alert-box">{{ message }}</div>
+                    {% endif %}
+                {% endif %}
+            {% endwith %}
 
-        <div class="item" id="menuCredits" onclick="showCredits(this)">credits</div>
-    </div>
-</div>
+            {% if auth_mode == "register" %}
+                <div class="login-title">Create account</div>
+                <div class="login-sub">Join the producer room. Upload beats, ZIP packs, patterns and discussions.</div>
 
-<div class="content" id="content">
-    {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-            {% set category = messages[0][0] %}
-            {% set message = messages[0][1] %}
+                <form action="/register" method="POST">
+                    <div class="login-input-wrap">
+                        <input name="username" placeholder="Username" required>
+                        <span class="login-icon">◆</span>
+                    </div>
 
-            {% if category == "success" %}
-                <div class="success-box">{{ message }}</div>
+                    <div class="login-input-wrap">
+                        <input name="email" type="email" placeholder="Email" required>
+                        <span class="login-icon">✉</span>
+                    </div>
+
+                    <div class="login-input-wrap">
+                        <input name="password" type="password" placeholder="Password" required>
+                        <span class="login-icon">■</span>
+                    </div>
+
+                    <button class="btn btn-white" type="submit">Create Account</button>
+                </form>
+
+                <div class="login-line"></div>
+
+                <button class="btn btn-dark" onclick="location.href='/?view=login'">Back to Login</button>
+
+                <div class="switch-text">
+                    Already have an account? <a href="/?view=login">Login</a>
+                </div>
             {% else %}
-                <div class="alert-box">{{ message }}</div>
-            {% endif %}
-        {% endif %}
-    {% endwith %}
+                <div class="login-title">Login</div>
+                <div class="login-sub">Private producer space for files, discussion, credits and account settings.</div>
 
-    <div class="page-title">select a section</div>
-    <div class="small">click a menu item.</div>
+                <form action="/login" method="POST">
+                    <div class="login-input-wrap">
+                        <input name="email" type="email" placeholder="Email" required>
+                        <span class="login-icon">✉</span>
+                    </div>
+
+                    <div class="login-input-wrap">
+                        <input name="password" type="password" placeholder="Password" required>
+                        <span class="login-icon">■</span>
+                    </div>
+
+                    <div class="login-row">
+                        <label><input type="checkbox" checked> Remember me</label>
+                        <span>private access</span>
+                    </div>
+
+                    <button class="btn btn-dark" type="submit">Login</button>
+                </form>
+
+                <div class="login-line"></div>
+
+                <button class="btn btn-white" onclick="location.href='/?view=register'">Create Account</button>
+
+                <div class="switch-text">
+                    New producer? <a href="/?view=register">Register</a>
+                </div>
+            {% endif %}
+        </div>
+    </div>
 </div>
+
+{% else %}
+
+<div class="app">
+    <div class="side">
+        <div class="title">FLOWZNMELHOR</div>
+
+        <div class="user-mini">
+            <div class="user-mini-name">{{ username }}</div>
+            <div class="user-mini-mail">{{ user_email }}</div>
+        </div>
+
+        <div class="menu-main">
+            <div class="item" id="menuDashboard" onclick="showDashboard(this)">home</div>
+            <div class="item" id="menuFiles" onclick="showFiles(this)">files</div>
+            <div class="item" id="menuDiscussion" onclick="showDiscussion(this)">discussion</div>
+        </div>
+
+        <div class="menu-bottom">
+            <div class="item" id="menuAccount" onclick="showAccount(this)">account</div>
+            <div class="item" id="menuCredits" onclick="showCredits(this)">credits</div>
+        </div>
+    </div>
+
+    <div class="content" id="content">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% set category = messages[0][0] %}
+                {% set message = messages[0][1] %}
+
+                {% if category == "success" %}
+                    <div class="success-box">{{ message }}</div>
+                {% else %}
+                    <div class="alert-box">{{ message }}</div>
+                {% endif %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="page-title">loading</div>
+        <div class="small">opening your producer space.</div>
+    </div>
+</div>
+
+{% endif %}
 
 <script>
 const files = {{ files|tojson }};
+const fileSizes = {{ file_sizes|tojson }};
 const credits = {{ credits|tojson }};
 const discussions = {{ discussions|tojson }};
 const userEmail = {{ user_email|tojson }};
@@ -558,13 +1083,15 @@ function clickEffect(el){
 
 function fadeChange(html){
     const content=document.getElementById("content");
+    if(!content) return;
+
     content.classList.add("fade");
 
     setTimeout(()=>{
         content.innerHTML=html;
         content.classList.remove("fade");
         bindFileInput();
-    },180);
+    },160);
 }
 
 function bindFileInput(){
@@ -590,6 +1117,97 @@ function setUrl(view, topicId=null){
     }
 }
 
+function showDashboard(button){
+    clickEffect(button);
+    clearActive();
+    if(button) button.classList.add("active");
+
+    setUrl("dashboard");
+
+    const totalComments = discussions.reduce((sum, t)=>sum + t.comments.length, 0);
+    const recentTopics = discussions.slice(0,3);
+    const recentFiles = files.slice(0,3);
+
+    let html=`
+        <div class="page-title">producer room</div>
+        <div class="page-sub">
+            Upload ZIP packs, share MP3 previews, start discussions, and build a private funk producer space.
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-label">uploaded files</div>
+                <div class="card-number">${files.length}</div>
+                <div class="card-text">ZIP packs and MP3 previews shared by members.</div>
+            </div>
+
+            <div class="card">
+                <div class="card-label">topics</div>
+                <div class="card-number">${discussions.length}</div>
+                <div class="card-text">Producer questions, beat feedback and ideas.</div>
+            </div>
+
+            <div class="card">
+                <div class="card-label">comments</div>
+                <div class="card-number">${totalComments}</div>
+                <div class="card-text">Community replies and feedback.</div>
+            </div>
+        </div>
+
+        <div class="pill-row">
+            <div class="pill">MTG ideas</div>
+            <div class="pill">FL Studio packs</div>
+            <div class="pill">Beat feedback</div>
+            <div class="pill">Producer chat</div>
+            <div class="pill">Brazil funk</div>
+        </div>
+
+        <div class="line">
+            <div class="topic-title">recent activity</div>
+            <br>
+    `;
+
+    if(recentTopics.length === 0 && recentFiles.length === 0){
+        html += `<div class="small">No activity yet. Upload a file or start the first discussion.</div>`;
+    }
+
+    recentFiles.forEach(file=>{
+        html += `
+            <div class="file-row">
+                <div class="file-title">${escapeHtml(file)}</div>
+                <div class="meta">new file · ${escapeHtml(fileSizes[file] || "")}</div>
+                <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
+            </div>
+        `;
+    });
+
+    recentTopics.forEach(topic=>{
+        html += `
+            <div class="topic-row">
+                <div class="topic-title">${escapeHtml(topic.title)}</div>
+                <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
+                <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
+            </div>
+        `;
+    });
+
+    html += `
+        </div>
+
+        <div class="form-box">
+            <div class="topic-title">make it feel alive</div>
+            <p class="small">
+                Add daily challenges, recent uploads, trending packs, beat feedback posts, top producers, and small stats.
+                Empty pages feel dead. Cards, activity, and challenges make the site feel active.
+            </p>
+            <button onclick="showFiles(document.getElementById('menuFiles'))">upload file</button>
+            <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">start discussion</button>
+        </div>
+    `;
+
+    fadeChange(html);
+}
+
 function showFiles(button){
     clickEffect(button);
     clearActive();
@@ -599,7 +1217,10 @@ function showFiles(button){
 
     let html=`
         <div class="page-title">files</div>
+        <div class="page-sub">Upload ZIP packs or MP3 previews. Use ZIP for FLP, stems, drum kits and folders.</div>
+
         <input id="searchInput" class="search-bar" placeholder="search files" oninput="filterFiles()">
+
         <div class="line">
     `;
 
@@ -611,6 +1232,7 @@ function showFiles(button){
         html+=`
             <div class="file-row" data-name="${escapeAttr(file.toLowerCase())}">
                 <div class="file-title">${escapeHtml(file)}</div>
+                <div class="meta">${escapeHtml(fileSizes[file] || "")}</div>
                 <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
             </div>
         `;
@@ -618,26 +1240,18 @@ function showFiles(button){
 
     html+=`</div>`;
 
-    if(userEmail){
-        html+=`
-            <div class="form-box">
-                <form action="/upload" method="POST" enctype="multipart/form-data">
-                    <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3" required hidden>
-                    <label for="fileInput" class="file-button">select zip or mp3</label>
-                    <span id="fileName" class="selected-file">no file selected</span>
-                    <br><br>
-                    <button type="submit">upload file</button>
-                </form>
-                <p class="small">allowed: zip and mp3 only. upload folders as zip files.</p>
-            </div>
-        `;
-    }else{
-        html+=`
-            <div class="form-box">
-                <div class="small">login to upload files.</div>
-            </div>
-        `;
-    }
+    html+=`
+        <div class="form-box">
+            <form action="/upload" method="POST" enctype="multipart/form-data">
+                <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3" required hidden>
+                <label for="fileInput" class="file-button">select zip or mp3</label>
+                <span id="fileName" class="selected-file">no file selected</span>
+                <br><br>
+                <button class="primary-btn" type="submit">upload file</button>
+            </form>
+            <p class="small">allowed: zip and mp3 only. maximum size: 1 GB.</p>
+        </div>
+    `;
 
     fadeChange(html);
 }
@@ -651,156 +1265,6 @@ function filterFiles(){
     });
 }
 
-function showLogin(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
-
-    setUrl("login");
-
-    let html=`<div class="page-title">login</div><div class="line">`;
-
-    if(userEmail){
-        html+=`
-            <div class="login-card">
-                <div class="login-card-title">Account</div>
-                <div class="login-card-sub">logged in as ${escapeHtml(username)}</div>
-
-                <form action="/logout" method="POST">
-                    <button class="login-btn login-primary" type="submit">logout</button>
-                </form>
-            </div>
-        `;
-    }else{
-        html+=`
-            <div class="login-card" id="loginCard">
-                <div class="login-card-title">Welcome back</div>
-                <div class="login-card-sub">login or create an account.</div>
-
-                <button class="login-btn login-primary" onclick="showPasswordLogin()">login</button>
-                <button class="login-btn" onclick="showCreateAccount()">create account</button>
-                <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
-            </div>
-        `;
-    }
-
-    html+=`</div>`;
-    fadeChange(html);
-}
-
-function showPasswordLogin(){
-    document.getElementById("loginCard").innerHTML=`
-        <div class="login-card-title">Login</div>
-        <div class="login-card-sub">enter your verified account details.</div>
-
-        <form action="/password-login" method="POST">
-            <input class="login-input" name="email" type="email" placeholder="email" required>
-            <input class="login-input" name="password" type="password" placeholder="password" required>
-            <button class="login-btn login-primary" type="submit">login</button>
-        </form>
-
-        <button class="login-btn" onclick="showCreateAccount()">create account</button>
-        <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
-        <button class="back-btn" onclick="showLoginFromInside()">back</button>
-    `;
-}
-
-function showCreateAccount(){
-    document.getElementById("loginCard").innerHTML=`
-        <div class="login-card-title">Create account</div>
-        <div class="login-card-sub">a code will be sent to your email.</div>
-
-        <form action="/register" method="POST">
-            <input class="login-input" name="username" placeholder="username" required>
-            <input class="login-input" name="email" type="email" placeholder="email" required>
-            <input class="login-input" name="password" type="password" placeholder="password" required>
-            <button class="login-btn login-primary" type="submit">send code</button>
-        </form>
-
-        <button class="login-btn" onclick="showPasswordLogin()">login</button>
-        <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
-        <button class="back-btn" onclick="showLoginFromInside()">back</button>
-    `;
-}
-
-function showVerifyAccount(){
-    document.getElementById("loginCard").innerHTML=`
-        <div class="login-card-title">Verify account</div>
-        <div class="login-card-sub">enter the code sent to your email.</div>
-
-        <form action="/verify-account" method="POST">
-            <input class="login-input" name="email" type="email" placeholder="email" required>
-            <input class="login-input" name="code" placeholder="code" required>
-            <button class="login-btn login-primary" type="submit">verify</button>
-        </form>
-
-        <button class="login-btn" onclick="showPasswordLogin()">login</button>
-        <button class="login-btn" onclick="showCreateAccount()">create account</button>
-        <button class="back-btn" onclick="showLoginFromInside()">back</button>
-    `;
-}
-
-function showLoginFromInside(){
-    document.getElementById("loginCard").innerHTML=`
-        <div class="login-card-title">Welcome back</div>
-        <div class="login-card-sub">login or create an account.</div>
-
-        <button class="login-btn login-primary" onclick="showPasswordLogin()">login</button>
-        <button class="login-btn" onclick="showCreateAccount()">create account</button>
-        <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
-    `;
-}
-
-function showAccount(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
-
-    setUrl("account");
-
-    let html=`
-        <div class="page-title">account</div>
-        <div class="line">
-            <div class="account-box">
-                <div class="login-card-title">${escapeHtml(username)}</div>
-                <div class="login-card-sub">${escapeHtml(userEmail)}</div>
-
-                <div class="account-section">
-                    <div class="topic-title">change username</div>
-                    <br>
-                    <form action="/change-username" method="POST">
-                        <input class="login-input" name="new_username" placeholder="new username" required>
-                        <button class="login-btn login-primary" type="submit">save username</button>
-                    </form>
-                </div>
-
-                <div class="account-section">
-                    <div class="topic-title">change password</div>
-                    <br>
-                    <form action="/request-password-change" method="POST">
-                        <input class="login-input" name="old_password" type="password" placeholder="old password" required>
-                        <input class="login-input" name="new_password" type="password" placeholder="new password" required>
-                        <button class="login-btn login-primary" type="submit">send code</button>
-                    </form>
-                    <br>
-                    <form action="/verify-password-change" method="POST">
-                        <input class="login-input" name="code" placeholder="code" required>
-                        <button class="login-btn login-primary" type="submit">verify password change</button>
-                    </form>
-                </div>
-
-                <div class="account-section">
-                    <form action="/logout" method="POST">
-                        <button class="login-btn" type="submit">logout</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    `;
-
-    fadeChange(html);
-}
-
 function showDiscussion(button){
     clickEffect(button);
     clearActive();
@@ -810,7 +1274,10 @@ function showDiscussion(button){
 
     let html=`
         <div class="page-title">discussion</div>
+        <div class="page-sub">Ask for feedback, share FL Studio tricks, post beat ideas, or start producer challenges.</div>
+
         <input id="discussionSearchInput" class="search-bar" placeholder="search discussions" oninput="filterDiscussions()">
+
         <div class="line">
     `;
 
@@ -825,6 +1292,8 @@ function showDiscussion(button){
             <div class="topic-row" data-name="${escapeAttr(searchable)}">
                 <div class="topic-title">${escapeHtml(topic.title)}</div>
                 <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
+                <div class="small">${escapeHtml(topic.body).slice(0,140)}${topic.body.length > 140 ? "..." : ""}</div>
+                <br>
                 <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
             </div>
         `;
@@ -832,24 +1301,16 @@ function showDiscussion(button){
 
     html+=`</div>`;
 
-    if(userEmail){
-        html+=`
-            <div class="form-box">
-                <form action="/topic" method="POST">
-                    <input name="title" placeholder="topic title" required style="width:100%;">
-                    <textarea name="body" placeholder="write topic text" required></textarea>
-                    <br><br>
-                    <button type="submit">add topic</button>
-                </form>
-            </div>
-        `;
-    }else{
-        html+=`
-            <div class="form-box">
-                <div class="small">login to add topic or comment.</div>
-            </div>
-        `;
-    }
+    html+=`
+        <div class="form-box">
+            <form action="/topic" method="POST">
+                <input name="title" placeholder="topic title" required style="width:100%;">
+                <textarea name="body" placeholder="write topic text" required></textarea>
+                <br><br>
+                <button class="primary-btn" type="submit">add topic</button>
+            </form>
+        </div>
+    `;
 
     fadeChange(html);
 }
@@ -875,12 +1336,11 @@ function openTopic(topicId){
 
     let html=`
         <div class="page-title">${escapeHtml(topic.title)}</div>
+        <div class="page-sub">by ${escapeHtml(topic.author)}</div>
         <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">back to discussion</button>
         <br><br>
 
         <div class="line">
-            <div class="topic-meta">by ${escapeHtml(topic.author)}</div>
-            <br>
             <div class="small">${escapeHtml(topic.body).replaceAll("\\n","<br>")}</div>
             <br><br>
             <div class="topic-title">comments</div>
@@ -901,17 +1361,62 @@ function openTopic(topicId){
 
     html+=`</div>`;
 
-    if(userEmail){
-        html+=`
-            <div class="form-box">
-                <form action="/comment/${topic.id}" method="POST">
-                    <textarea name="body" placeholder="write comment" required></textarea>
-                    <br><br>
-                    <button type="submit">add comment</button>
-                </form>
+    html+=`
+        <div class="form-box">
+            <form action="/comment/${topic.id}" method="POST">
+                <textarea name="body" placeholder="write comment" required></textarea>
+                <br><br>
+                <button class="primary-btn" type="submit">add comment</button>
+            </form>
+        </div>
+    `;
+
+    fadeChange(html);
+}
+
+function showAccount(button){
+    clickEffect(button);
+    clearActive();
+    if(button) button.classList.add("active");
+
+    setUrl("account");
+
+    let html=`
+        <div class="page-title">account</div>
+        <div class="page-sub">Edit your username, password or logout.</div>
+
+        <div class="line">
+            <div class="account-box">
+                <div class="login-card-title">${escapeHtml(username)}</div>
+                <div class="login-card-sub">${escapeHtml(userEmail)}</div>
+
+                <div class="account-section">
+                    <div class="topic-title">change username</div>
+                    <br>
+                    <form action="/change-username" method="POST">
+                        <input class="login-input" name="new_username" placeholder="new username" required>
+                        <button class="login-btn primary-btn" type="submit">save username</button>
+                    </form>
+                </div>
+
+                <div class="account-section">
+                    <div class="topic-title">change password</div>
+                    <br>
+                    <form action="/change-password" method="POST">
+                        <input class="login-input" name="old_password" type="password" placeholder="old password" required>
+                        <input class="login-input" name="new_password" type="password" placeholder="new password" required>
+                        <button class="login-btn primary-btn" type="submit">save password</button>
+                    </form>
+                </div>
+
+                <div class="account-section">
+                    <form action="/logout" method="POST">
+                        <button class="login-btn" type="submit">logout</button>
+                    </form>
+                </div>
             </div>
-        `;
-    }
+        </div>
+    `;
 
     fadeChange(html);
 }
@@ -925,6 +1430,8 @@ function showCredits(button){
 
     let html=`
         <div class="page-title">credits</div>
+        <div class="page-sub">People behind the site.</div>
+
         <div class="line">
             <div class="credit-heading">OWNERS</div>
     `;
@@ -981,6 +1488,8 @@ function escapeAttr(text){
 }
 
 window.addEventListener("load", ()=>{
+    if(!userEmail) return;
+
     setTimeout(()=>{
         if(startView === "files"){
             showFiles(document.getElementById("menuFiles"));
@@ -989,16 +1498,11 @@ window.addEventListener("load", ()=>{
         }else if(startView === "topic" && startTopicId){
             openTopic(startTopicId);
         }else if(startView === "account"){
-            const accountButton=document.getElementById("menuAccount");
-            if(accountButton){
-                showAccount(accountButton);
-            }else{
-                showLogin(document.getElementById("menuLogin"));
-            }
-        }else if(startView === "login"){
-            showLogin(document.getElementById("menuLogin"));
+            showAccount(document.getElementById("menuAccount"));
         }else if(startView === "credits"){
             showCredits(document.getElementById("menuCredits"));
+        }else{
+            showDashboard(document.getElementById("menuDashboard"));
         }
     },100);
 });
@@ -1011,15 +1515,33 @@ window.addEventListener("load", ()=>{
 
 @app.route("/")
 def home():
+    logged_in = bool(current_user())
+    requested_view = request.args.get("view", "")
+    requested_topic = request.args.get("id", "")
+
+    if not logged_in:
+        auth_mode = "register" if requested_view == "register" else "login"
+        requested_view = "login"
+        requested_topic = ""
+    else:
+        auth_mode = ""
+        if requested_view in ["login", "register", ""]:
+            requested_view = "dashboard"
+
+    files = get_files() if logged_in else []
+    file_sizes = {file: file_size_text(file) for file in files}
+
     return render_template_string(
         HTML,
-        files=get_files(),
+        files=files,
+        file_sizes=file_sizes,
         credits=CREDITS,
-        discussions=load_discussions(),
+        discussions=load_discussions() if logged_in else [],
         user_email=current_user(),
         username=current_username(),
-        start_view=request.args.get("view", ""),
-        start_topic_id=request.args.get("id", "")
+        start_view=requested_view,
+        start_topic_id=requested_topic,
+        auth_mode=auth_mode
     )
 
 
@@ -1031,92 +1553,41 @@ def register():
 
     if not valid_username(username):
         flash("Username must be 3-20 characters and only use letters, numbers, underscore, or dot.", "error")
-        return go("login")
+        return redirect(url_for("home", view="register"))
 
     if username_exists(username):
         flash("Username already exists. Choose another one.", "error")
-        return go("login")
+        return redirect(url_for("home", view="register"))
 
     if "@" not in email or "." not in email:
         flash("Invalid email address.", "error")
-        return go("login")
+        return redirect(url_for("home", view="register"))
 
     if len(password) < 6:
         flash("Password must be at least 6 characters.", "error")
-        return go("login")
+        return redirect(url_for("home", view="register"))
 
     users = load_users()
 
-    if email in users and users[email].get("verified"):
+    if email in users:
         flash("Account already exists. Please login instead.", "error")
-        return go("login")
-
-    code = make_code()
+        return redirect(url_for("home", view="login"))
 
     users[email] = {
         "username": username,
         "password_hash": generate_password_hash(password),
-        "verified": False,
-        "verify_code": code,
-        "verify_expires": int(time.time()) + 900,
         "created": int(time.time())
     }
 
     save_users(users)
 
-    try:
-        sent = send_code_email(email, code)
-    except Exception as e:
-        print("MAIL ERROR:", e)
-        flash("Could not send email. Check SMTP settings.", "error")
-        return go("login")
-
-    if sent:
-        flash("Code sent to your email.", "success")
-    else:
-        flash("Email settings missing. Code printed in terminal.", "error")
-
-    return go("login")
-
-
-@app.route("/verify-account", methods=["POST"])
-def verify_account():
-    email = request.form.get("email", "").strip().lower()
-    code = request.form.get("code", "").strip()
-
-    users = load_users()
-    user = users.get(email)
-
-    if not user:
-        flash("Account not found.", "error")
-        return go("login")
-
-    if user.get("verified"):
-        flash("Account already verified. Login now.", "success")
-        return go("login")
-
-    if int(time.time()) > int(user.get("verify_expires", 0)):
-        flash("Code expired. Create account again to get a new code.", "error")
-        return go("login")
-
-    if user.get("verify_code") != code:
-        flash("Wrong code.", "error")
-        return go("login")
-
-    user["verified"] = True
-    user["verify_code"] = ""
-    user["verify_expires"] = 0
-    users[email] = user
-    save_users(users)
-
     session["email"] = email
+    flash("Account created successfully.", "success")
+    return go("dashboard")
 
-    flash("Account verified. You are logged in.", "success")
-    return go("account")
 
-
-@app.route("/password-login", methods=["POST"])
-def password_login():
+@app.route("/login", methods=["POST"])
+def login():
     email = request.form.get("email", "").strip().lower()
     password = request.form.get("password", "")
 
@@ -1125,20 +1596,24 @@ def password_login():
 
     if not user:
         flash("Account not found. Please create an account first.", "error")
-        return go("login")
-
-    if not user.get("verified"):
-        flash("Account not verified. Enter your code first.", "error")
-        return go("login")
+        return redirect(url_for("home", view="login"))
 
     if not check_password_hash(user.get("password_hash", ""), password):
         flash("Wrong password. Please try again.", "error")
-        return go("login")
+        return redirect(url_for("home", view="login"))
 
     session["email"] = email
 
     flash("Logged in successfully.", "success")
-    return go("account")
+    return go("dashboard")
+
+
+@app.route("/logout", methods=["POST"])
+@login_required
+def logout():
+    session.clear()
+    flash("Logged out.", "success")
+    return redirect(url_for("home", view="login"))
 
 
 @app.route("/change-username", methods=["POST"])
@@ -1161,7 +1636,7 @@ def change_username():
     if not user:
         session.clear()
         flash("Account not found.", "error")
-        return go("login")
+        return redirect(url_for("home", view="login"))
 
     user["username"] = new_username
     users[email] = user
@@ -1173,9 +1648,9 @@ def change_username():
     return go("account")
 
 
-@app.route("/request-password-change", methods=["POST"])
+@app.route("/change-password", methods=["POST"])
 @login_required
-def request_password_change():
+def change_password():
     email = current_user()
     old_password = request.form.get("old_password", "")
     new_password = request.form.get("new_password", "")
@@ -1186,7 +1661,7 @@ def request_password_change():
     if not user:
         session.clear()
         flash("Account not found.", "error")
-        return go("login")
+        return redirect(url_for("home", view="login"))
 
     if not check_password_hash(user.get("password_hash", ""), old_password):
         flash("Old password is wrong.", "error")
@@ -1196,73 +1671,12 @@ def request_password_change():
         flash("New password must be at least 6 characters.", "error")
         return go("account")
 
-    code = make_code()
-
-    user["password_change_code"] = code
-    user["password_change_expires"] = int(time.time()) + 900
-    user["pending_password_hash"] = generate_password_hash(new_password)
-    users[email] = user
-    save_users(users)
-
-    try:
-        sent = send_code_email(email, code)
-    except Exception as e:
-        print("MAIL ERROR:", e)
-        flash("Could not send email. Check SMTP settings.", "error")
-        return go("account")
-
-    if sent:
-        flash("Password change code sent to your email.", "success")
-    else:
-        flash("Email settings missing. Code printed in terminal.", "error")
-
-    return go("account")
-
-
-@app.route("/verify-password-change", methods=["POST"])
-@login_required
-def verify_password_change():
-    email = current_user()
-    code = request.form.get("code", "").strip()
-
-    users = load_users()
-    user = users.get(email)
-
-    if not user:
-        session.clear()
-        flash("Account not found.", "error")
-        return go("login")
-
-    if int(time.time()) > int(user.get("password_change_expires", 0)):
-        flash("Code expired. Try changing password again.", "error")
-        return go("account")
-
-    if user.get("password_change_code") != code:
-        flash("Wrong code.", "error")
-        return go("account")
-
-    pending_hash = user.get("pending_password_hash", "")
-
-    if not pending_hash:
-        flash("No pending password change.", "error")
-        return go("account")
-
-    user["password_hash"] = pending_hash
-    user["pending_password_hash"] = ""
-    user["password_change_code"] = ""
-    user["password_change_expires"] = 0
+    user["password_hash"] = generate_password_hash(new_password)
     users[email] = user
     save_users(users)
 
     flash("Password changed successfully.", "success")
     return go("account")
-
-
-@app.route("/logout", methods=["POST"])
-def logout():
-    session.clear()
-    flash("Logged out.", "success")
-    return go("login")
 
 
 @app.route("/upload", methods=["POST"])
@@ -1297,12 +1711,13 @@ def upload():
 
 
 @app.route("/download/<path:filename>")
+@login_required
 def download(filename):
     filename = secure_filename(filename)
     file_path = os.path.join(UPLOAD_FOLDER, filename)
 
     if not os.path.exists(file_path):
-        flash("File not found on server. It may have been deleted after restart.", "error")
+        flash("File not found on server.", "error")
         return go("files")
 
     return send_from_directory(
@@ -1332,6 +1747,7 @@ def add_topic():
         "body": body[:3000],
         "author": current_username(),
         "author_email": current_user(),
+        "created": int(time.time()),
         "comments": []
     })
 
@@ -1351,7 +1767,6 @@ def add_comment(topic_id):
         return go("topic", topic_id)
 
     discussions = load_discussions()
-
     found = False
 
     for topic in discussions:
