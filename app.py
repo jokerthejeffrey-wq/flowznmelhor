@@ -3,11 +3,13 @@ import json
 import gzip
 import time
 import secrets
+import random
 from functools import wraps
 
 from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory, session, flash
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_mail import Mail, Message
 
 app = Flask(__name__)
 
@@ -43,8 +45,19 @@ app.secret_key = get_or_create_secret_key()
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
+app.config["MAIL_SERVER"] = os.environ.get("MAIL_SERVER", "smtp.gmail.com")
+app.config["MAIL_PORT"] = int(os.environ.get("MAIL_PORT", "587"))
+app.config["MAIL_USE_TLS"] = True
+app.config["MAIL_USE_SSL"] = False
+app.config["MAIL_USERNAME"] = os.environ.get("MAIL_USERNAME", "")
+app.config["MAIL_PASSWORD"] = os.environ.get("MAIL_PASSWORD", "")
+app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "")
+
+mail = Mail(app)
+
 CREDITS = [
-    "FlowZNmelhor Members",
+    "FlowZNmelhor",
+    "Your Name Here"
 ]
 
 
@@ -52,6 +65,32 @@ def go(view="home", topic_id=None):
     if topic_id:
         return redirect(url_for("home", view=view, id=topic_id))
     return redirect(url_for("home", view=view))
+
+
+def make_code():
+    return str(random.randint(1000, 9999))
+
+
+def send_code_email(email, code):
+    body = f"""Your code: {code}
+
+If this was not sent by you, ignore it."""
+
+    if not app.config["MAIL_USERNAME"] or not app.config["MAIL_PASSWORD"]:
+        print("\nEMAIL NOT CONFIGURED")
+        print("To:", email)
+        print(body)
+        print()
+        return False
+
+    msg = Message(
+        subject="Your verification code",
+        recipients=[email],
+        body=body
+    )
+
+    mail.send(msg)
+    return True
 
 
 def load_json_gz(path, default):
@@ -182,9 +221,7 @@ HTML = """
 <title>FlowZNmelhor</title>
 
 <style>
-*{
-    box-sizing:border-box;
-}
+*{box-sizing:border-box}
 
 body{
     margin:0;
@@ -211,9 +248,7 @@ body{
     margin-bottom:34px;
 }
 
-.menu-main{
-    flex:1;
-}
+.menu-main{flex:1}
 
 .menu-bottom{
     border-top:1px solid #222;
@@ -233,24 +268,12 @@ body{
     transform:translateX(5px);
 }
 
-.clicked{
-    animation:clickFade .35s ease;
-}
+.clicked{animation:clickFade .35s ease}
 
 @keyframes clickFade{
-    0%{
-        opacity:1;
-    }
-
-    40%{
-        opacity:.35;
-        transform:translateX(8px);
-    }
-
-    100%{
-        opacity:1;
-        transform:translateX(5px);
-    }
+    0%{opacity:1}
+    40%{opacity:.35;transform:translateX(8px)}
+    100%{opacity:1;transform:translateX(5px)}
 }
 
 .content{
@@ -287,9 +310,7 @@ input,textarea{
     font-size:14px;
 }
 
-input:focus,textarea:focus{
-    border-color:#777;
-}
+input:focus,textarea:focus{border-color:#777}
 
 textarea{
     width:100%;
@@ -407,9 +428,7 @@ button:hover,.file-button:hover{
     border-radius:0;
 }
 
-.back-btn{
-    margin-top:8px;
-}
+.back-btn{margin-top:8px}
 
 .selected-file{
     color:#666;
@@ -500,7 +519,6 @@ const startTopicId = {{ start_topic_id|tojson }};
 
 function clickEffect(el){
     if(!el) return;
-
     el.classList.remove("clicked");
     void el.offsetWidth;
     el.classList.add("clicked");
@@ -573,15 +591,11 @@ function showFiles(button){
             <div class="form-box">
                 <form action="/upload" method="POST" enctype="multipart/form-data">
                     <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3" required hidden>
-
                     <label for="fileInput" class="file-button">select zip or mp3</label>
                     <span id="fileName" class="selected-file">no file selected</span>
-
                     <br><br>
-
                     <button type="submit">upload file</button>
                 </form>
-
                 <p class="small">allowed: zip and mp3 only. upload folders as zip files.</p>
             </div>
         `;
@@ -633,6 +647,7 @@ function showLogin(button){
 
                 <button class="login-btn login-primary" onclick="showPasswordLogin()">login</button>
                 <button class="login-btn" onclick="showCreateAccount()">create account</button>
+                <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
             </div>
         `;
     }
@@ -644,16 +659,16 @@ function showLogin(button){
 function showPasswordLogin(){
     document.getElementById("loginCard").innerHTML=`
         <div class="login-card-title">Login</div>
-        <div class="login-card-sub">enter your account details.</div>
+        <div class="login-card-sub">enter your verified account details.</div>
 
         <form action="/password-login" method="POST">
             <input class="login-input" name="email" type="email" placeholder="email" required>
             <input class="login-input" name="password" type="password" placeholder="password" required>
-
             <button class="login-btn login-primary" type="submit">login</button>
         </form>
 
         <button class="login-btn" onclick="showCreateAccount()">create account</button>
+        <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
         <button class="back-btn" onclick="showLoginFromInside()">back</button>
     `;
 }
@@ -661,17 +676,34 @@ function showPasswordLogin(){
 function showCreateAccount(){
     document.getElementById("loginCard").innerHTML=`
         <div class="login-card-title">Create account</div>
-        <div class="login-card-sub">choose a unique username.</div>
+        <div class="login-card-sub">a code will be sent to your email.</div>
 
         <form action="/register" method="POST">
             <input class="login-input" name="username" placeholder="username" required>
             <input class="login-input" name="email" type="email" placeholder="email" required>
             <input class="login-input" name="password" type="password" placeholder="password" required>
-
-            <button class="login-btn login-primary" type="submit">create account</button>
+            <button class="login-btn login-primary" type="submit">send code</button>
         </form>
 
         <button class="login-btn" onclick="showPasswordLogin()">login</button>
+        <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
+        <button class="back-btn" onclick="showLoginFromInside()">back</button>
+    `;
+}
+
+function showVerifyAccount(){
+    document.getElementById("loginCard").innerHTML=`
+        <div class="login-card-title">Verify account</div>
+        <div class="login-card-sub">enter the code sent to your email.</div>
+
+        <form action="/verify-account" method="POST">
+            <input class="login-input" name="email" type="email" placeholder="email" required>
+            <input class="login-input" name="code" placeholder="code" required>
+            <button class="login-btn login-primary" type="submit">verify</button>
+        </form>
+
+        <button class="login-btn" onclick="showPasswordLogin()">login</button>
+        <button class="login-btn" onclick="showCreateAccount()">create account</button>
         <button class="back-btn" onclick="showLoginFromInside()">back</button>
     `;
 }
@@ -683,6 +715,7 @@ function showLoginFromInside(){
 
         <button class="login-btn login-primary" onclick="showPasswordLogin()">login</button>
         <button class="login-btn" onclick="showCreateAccount()">create account</button>
+        <button class="login-btn" onclick="showVerifyAccount()">verify account</button>
     `;
 }
 
@@ -703,7 +736,6 @@ function showAccount(button){
                 <div class="account-section">
                     <div class="topic-title">change username</div>
                     <br>
-
                     <form action="/change-username" method="POST">
                         <input class="login-input" name="new_username" placeholder="new username" required>
                         <button class="login-btn login-primary" type="submit">save username</button>
@@ -713,11 +745,15 @@ function showAccount(button){
                 <div class="account-section">
                     <div class="topic-title">change password</div>
                     <br>
-
-                    <form action="/change-password" method="POST">
+                    <form action="/request-password-change" method="POST">
                         <input class="login-input" name="old_password" type="password" placeholder="old password" required>
                         <input class="login-input" name="new_password" type="password" placeholder="new password" required>
-                        <button class="login-btn login-primary" type="submit">save password</button>
+                        <button class="login-btn login-primary" type="submit">send code</button>
+                    </form>
+                    <br>
+                    <form action="/verify-password-change" method="POST">
+                        <input class="login-input" name="code" placeholder="code" required>
+                        <button class="login-btn login-primary" type="submit">verify password change</button>
                     </form>
                 </div>
 
@@ -949,20 +985,71 @@ def register():
 
     users = load_users()
 
-    if email in users:
+    if email in users and users[email].get("verified"):
         flash("Account already exists. Please login instead.", "error")
         return go("login")
+
+    code = make_code()
 
     users[email] = {
         "username": username,
         "password_hash": generate_password_hash(password),
+        "verified": False,
+        "verify_code": code,
+        "verify_expires": int(time.time()) + 900,
         "created": int(time.time())
     }
 
     save_users(users)
+
+    try:
+        sent = send_code_email(email, code)
+    except Exception as e:
+        print("MAIL ERROR:", e)
+        flash("Could not send email. Check SMTP settings.", "error")
+        return go("login")
+
+    if sent:
+        flash("Code sent to your email.", "success")
+    else:
+        flash("Email settings missing. Code printed in terminal.", "error")
+
+    return go("login")
+
+
+@app.route("/verify-account", methods=["POST"])
+def verify_account():
+    email = request.form.get("email", "").strip().lower()
+    code = request.form.get("code", "").strip()
+
+    users = load_users()
+    user = users.get(email)
+
+    if not user:
+        flash("Account not found.", "error")
+        return go("login")
+
+    if user.get("verified"):
+        flash("Account already verified. Login now.", "success")
+        return go("login")
+
+    if int(time.time()) > int(user.get("verify_expires", 0)):
+        flash("Code expired. Create account again to get a new code.", "error")
+        return go("login")
+
+    if user.get("verify_code") != code:
+        flash("Wrong code.", "error")
+        return go("login")
+
+    user["verified"] = True
+    user["verify_code"] = ""
+    user["verify_expires"] = 0
+    users[email] = user
+    save_users(users)
+
     session["email"] = email
 
-    flash("Account created successfully.", "success")
+    flash("Account verified. You are logged in.", "success")
     return go("account")
 
 
@@ -976,6 +1063,10 @@ def password_login():
 
     if not user:
         flash("Account not found. Please create an account first.", "error")
+        return go("login")
+
+    if not user.get("verified"):
+        flash("Account not verified. Enter your code first.", "error")
         return go("login")
 
     if not check_password_hash(user.get("password_hash", ""), password):
@@ -1020,9 +1111,9 @@ def change_username():
     return go("account")
 
 
-@app.route("/change-password", methods=["POST"])
+@app.route("/request-password-change", methods=["POST"])
 @login_required
-def change_password():
+def request_password_change():
     email = current_user()
     old_password = request.form.get("old_password", "")
     new_password = request.form.get("new_password", "")
@@ -1043,7 +1134,61 @@ def change_password():
         flash("New password must be at least 6 characters.", "error")
         return go("account")
 
-    user["password_hash"] = generate_password_hash(new_password)
+    code = make_code()
+
+    user["password_change_code"] = code
+    user["password_change_expires"] = int(time.time()) + 900
+    user["pending_password_hash"] = generate_password_hash(new_password)
+    users[email] = user
+    save_users(users)
+
+    try:
+        sent = send_code_email(email, code)
+    except Exception as e:
+        print("MAIL ERROR:", e)
+        flash("Could not send email. Check SMTP settings.", "error")
+        return go("account")
+
+    if sent:
+        flash("Password change code sent to your email.", "success")
+    else:
+        flash("Email settings missing. Code printed in terminal.", "error")
+
+    return go("account")
+
+
+@app.route("/verify-password-change", methods=["POST"])
+@login_required
+def verify_password_change():
+    email = current_user()
+    code = request.form.get("code", "").strip()
+
+    users = load_users()
+    user = users.get(email)
+
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return go("login")
+
+    if int(time.time()) > int(user.get("password_change_expires", 0)):
+        flash("Code expired. Try changing password again.", "error")
+        return go("account")
+
+    if user.get("password_change_code") != code:
+        flash("Wrong code.", "error")
+        return go("account")
+
+    pending_hash = user.get("pending_password_hash", "")
+
+    if not pending_hash:
+        flash("No pending password change.", "error")
+        return go("account")
+
+    user["password_hash"] = pending_hash
+    user["pending_password_hash"] = ""
+    user["password_change_code"] = ""
+    user["password_change_expires"] = 0
     users[email] = user
     save_users(users)
 
