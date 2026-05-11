@@ -105,6 +105,7 @@ def current_user():
 
 def current_username():
     email = current_user()
+
     if not email:
         return ""
 
@@ -194,6 +195,7 @@ def login_required(func):
         if not current_user():
             flash("Please login first.", "error")
             return redirect(url_for("home", view="login"))
+
         return func(*args, **kwargs)
 
     return wrapper
@@ -219,6 +221,7 @@ def block_guest_actions():
 def go(view="dashboard", topic_id=None):
     if topic_id:
         return redirect(url_for("home", view=view, id=topic_id))
+
     return redirect(url_for("home", view=view))
 
 
@@ -236,16 +239,17 @@ HTML = """
 
 :root{
     --white:#ffffff;
-    --text:#f7fbff;
-    --muted:rgba(255,255,255,.72);
-    --soft:rgba(255,255,255,.54);
+    --text:#f8fbff;
+    --muted:rgba(255,255,255,.68);
+    --soft:rgba(255,255,255,.42);
     --blue:#9fe7ff;
-    --blue2:#4eb8ff;
+    --blue2:#3ebcff;
     --dark:#06101d;
-    --panel:rgba(3,13,24,.74);
-    --panel2:rgba(0,0,0,.34);
-    --line:rgba(255,255,255,.26);
-    --line2:rgba(255,255,255,.14);
+    --panel:rgba(3,10,18,.78);
+    --panel2:rgba(0,0,0,.30);
+    --panel3:rgba(255,255,255,.055);
+    --line:rgba(255,255,255,.24);
+    --thin:rgba(255,255,255,.12);
 }
 
 body{
@@ -254,9 +258,9 @@ body{
     color:var(--text);
     font-family:Arial,Helvetica,sans-serif;
     background:
-        linear-gradient(rgba(2,8,16,.70), rgba(2,8,16,.84)),
-        radial-gradient(circle at 18% 18%, rgba(125,215,255,.34), transparent 28%),
-        radial-gradient(circle at 84% 78%, rgba(43,110,190,.32), transparent 35%),
+        linear-gradient(rgba(2,7,13,.78), rgba(2,7,13,.90)),
+        radial-gradient(circle at 18% 16%, rgba(100,210,255,.26), transparent 28%),
+        radial-gradient(circle at 86% 82%, rgba(55,120,200,.22), transparent 34%),
         url("/static/bg.png");
     background-size:cover;
     background-position:center;
@@ -268,10 +272,10 @@ body::before{
     position:fixed;
     inset:0;
     background-image:
-        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
-    background-size:24px 24px;
-    opacity:.65;
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+    background-size:28px 28px;
+    opacity:.72;
     pointer-events:none;
     z-index:0;
 }
@@ -279,13 +283,8 @@ body::before{
 body::after{
     content:"";
     position:fixed;
-    width:420px;
-    height:420px;
-    right:-150px;
-    top:-160px;
-    background:rgba(159,231,255,.17);
-    filter:blur(35px);
-    border-radius:50%;
+    inset:16px;
+    border:1px solid rgba(255,255,255,.08);
     pointer-events:none;
     z-index:0;
 }
@@ -300,6 +299,8 @@ body::after{
 }
 
 .login-only{
+    position:relative;
+    z-index:1;
     height:100vh;
     display:flex;
     justify-content:center;
@@ -309,24 +310,34 @@ body::after{
 
 .login-shell{
     width:370px;
-    background:rgba(220,245,255,.20);
-    border:1px solid rgba(255,255,255,.42);
+    background:rgba(4,14,25,.78);
+    border:1px solid var(--line);
     backdrop-filter:blur(18px);
     -webkit-backdrop-filter:blur(18px);
-    box-shadow:0 28px 80px rgba(0,0,0,.50);
-    border-radius:6px;
+    box-shadow:0 28px 90px rgba(0,0,0,.52);
+    border-radius:0;
     padding:32px;
     position:relative;
-    overflow:hidden;
 }
 
 .login-shell::before{
     content:"";
     position:absolute;
-    inset:0;
-    background:
-        linear-gradient(120deg, rgba(255,255,255,.32), transparent 42%),
-        radial-gradient(circle at 20% 0%, rgba(255,255,255,.20), transparent 35%);
+    left:0;
+    top:0;
+    right:0;
+    height:1px;
+    background:linear-gradient(90deg, transparent, rgba(159,231,255,.8), transparent);
+}
+
+.login-shell::after{
+    content:"";
+    position:absolute;
+    left:22px;
+    top:22px;
+    right:22px;
+    bottom:22px;
+    border:1px solid rgba(255,255,255,.06);
     pointer-events:none;
 }
 
@@ -336,35 +347,35 @@ body::after{
 }
 
 .login-logo{
-    font-size:12px;
-    letter-spacing:3px;
+    font-size:11px;
+    letter-spacing:4px;
     font-weight:900;
     color:white;
-    margin-bottom:28px;
+    margin-bottom:30px;
+    text-transform:uppercase;
 }
 
 .login-logo::after{
     content:"";
     display:block;
-    width:46px;
-    height:2px;
+    width:44px;
+    height:1px;
     background:var(--blue);
     margin-top:12px;
 }
 
 .login-title{
-    font-size:30px;
+    font-size:28px;
     font-weight:900;
     color:white;
     margin-bottom:8px;
     letter-spacing:-1px;
-    text-shadow:0 3px 18px rgba(0,0,0,.40);
 }
 
 .login-sub{
-    color:rgba(255,255,255,.76);
-    font-size:14px;
-    line-height:1.6;
+    color:var(--muted);
+    font-size:13px;
+    line-height:1.7;
     margin-bottom:26px;
 }
 
@@ -375,35 +386,41 @@ body::after{
 
 .login-input-wrap input{
     width:100%;
-    background:transparent;
+    background:rgba(255,255,255,.035);
     border:none;
-    border-bottom:1px solid rgba(255,255,255,.70);
+    border-bottom:1px solid rgba(255,255,255,.62);
     color:white;
     outline:none;
-    padding:13px 32px 11px 0;
+    padding:13px 32px 11px 10px;
     font-size:14px;
     font-weight:700;
+    border-radius:0;
 }
 
 .login-input-wrap input::placeholder{
-    color:rgba(255,255,255,.70);
+    color:rgba(255,255,255,.62);
     font-weight:500;
+}
+
+.login-input-wrap input:focus{
+    background:rgba(255,255,255,.07);
+    border-bottom-color:var(--blue);
 }
 
 .login-icon{
     position:absolute;
-    right:2px;
+    right:8px;
     top:12px;
     color:white;
-    font-size:14px;
-    opacity:.9;
+    font-size:12px;
+    opacity:.84;
 }
 
 .login-row{
     display:flex;
     justify-content:space-between;
     align-items:center;
-    color:rgba(255,255,255,.74);
+    color:rgba(255,255,255,.70);
     font-size:12px;
     margin:6px 0 22px;
 }
@@ -418,13 +435,14 @@ body::after{
     justify-content:center;
     width:100%;
     height:44px;
-    border-radius:4px;
+    border-radius:0;
     border:1px solid rgba(255,255,255,.28);
     cursor:pointer;
-    transition:.18s ease;
+    transition:.16s ease;
     font-weight:900;
-    font-size:14px;
+    font-size:13px;
     text-decoration:none;
+    letter-spacing:.4px;
 }
 
 .btn-dark{
@@ -433,9 +451,8 @@ body::after{
 }
 
 .btn-dark:hover{
-    background:#102b43;
+    background:#0d2235;
     border-color:var(--blue);
-    transform:translateY(-1px);
 }
 
 .btn-white{
@@ -446,17 +463,16 @@ body::after{
 
 .btn-white:hover{
     background:#e9f8ff;
-    transform:translateY(-1px);
 }
 
 .login-line{
     height:1px;
-    background:rgba(255,255,255,.30);
+    background:rgba(255,255,255,.22);
     margin:18px 0 14px;
 }
 
 .switch-text{
-    color:rgba(255,255,255,.78);
+    color:rgba(255,255,255,.72);
     text-align:center;
     font-size:13px;
     margin-top:18px;
@@ -472,58 +488,59 @@ body::after{
 .success-box{
     padding:12px 14px;
     margin-bottom:18px;
-    font-size:14px;
-    border-radius:4px;
+    font-size:13px;
+    border-radius:0;
 }
 
 .alert-box{
-    background:rgba(80,0,0,.55);
+    background:rgba(80,0,0,.48);
     color:#ffdede;
-    border:1px solid rgba(255,90,90,.46);
-    border-left:3px solid #ff5757;
+    border:1px solid rgba(255,90,90,.44);
+    border-left:2px solid #ff5757;
 }
 
 .success-box{
-    background:rgba(0,70,30,.48);
+    background:rgba(0,70,30,.44);
     color:#d6ffe1;
-    border:1px solid rgba(67,232,139,.44);
-    border-left:3px solid #43e88b;
+    border:1px solid rgba(67,232,139,.42);
+    border-left:2px solid #43e88b;
 }
 
 .side{
     width:260px;
-    padding:28px 20px;
+    padding:26px 20px;
     border:1px solid var(--line);
     background:var(--panel);
     backdrop-filter:blur(18px);
     -webkit-backdrop-filter:blur(18px);
-    box-shadow:0 22px 60px rgba(0,0,0,.45);
+    box-shadow:0 22px 70px rgba(0,0,0,.44);
     display:flex;
     flex-direction:column;
-    border-radius:6px;
+    border-radius:0;
 }
 
 .title{
-    font-size:12px;
-    letter-spacing:3px;
+    font-size:11px;
+    letter-spacing:4px;
     color:white;
-    margin-bottom:34px;
+    margin-bottom:28px;
     font-weight:900;
+    text-transform:uppercase;
 }
 
 .title::after{
     content:"";
     display:block;
     width:42px;
-    height:2px;
+    height:1px;
     background:var(--blue);
     margin-top:12px;
 }
 
 .user-mini{
-    background:rgba(255,255,255,.08);
-    border:1px solid rgba(255,255,255,.14);
-    border-radius:4px;
+    background:rgba(255,255,255,.045);
+    border:1px solid rgba(255,255,255,.12);
+    border-radius:0;
     padding:12px;
     margin-bottom:24px;
 }
@@ -546,60 +563,62 @@ body::after{
 }
 
 .menu-bottom{
-    border-top:1px solid var(--line2);
+    border-top:1px solid var(--thin);
     padding-top:18px;
 }
 
 .item{
     cursor:pointer;
     user-select:none;
-    transition:.18s ease;
+    transition:.16s ease;
     line-height:2.35;
-    color:rgba(255,255,255,.76);
+    color:rgba(255,255,255,.68);
     padding:2px 10px;
     margin-bottom:4px;
-    border-radius:4px;
-    font-size:14px;
-    letter-spacing:.4px;
+    border-radius:0;
+    font-size:13px;
+    letter-spacing:.7px;
+    border-left:1px solid transparent;
 }
 
 .item:hover,
 .item.active{
     color:white;
-    background:rgba(255,255,255,.13);
-    transform:translateX(4px);
+    background:rgba(255,255,255,.075);
+    border-left-color:var(--blue);
+    transform:translateX(3px);
 }
 
 .clicked{
-    animation:clickFade .35s ease;
+    animation:clickFade .28s ease;
 }
 
 @keyframes clickFade{
     0%{opacity:1}
-    40%{opacity:.45;transform:translateX(8px)}
-    100%{opacity:1;transform:translateX(4px)}
+    45%{opacity:.45;transform:translateX(7px)}
+    100%{opacity:1;transform:translateX(3px)}
 }
 
 .content{
     flex:1;
     padding:42px;
     overflow-y:auto;
-    transition:opacity .25s ease,transform .25s ease;
+    transition:opacity .22s ease,transform .22s ease;
     border:1px solid var(--line);
     background:var(--panel);
     backdrop-filter:blur(20px);
     -webkit-backdrop-filter:blur(20px);
-    box-shadow:0 22px 65px rgba(0,0,0,.42);
-    border-radius:6px;
+    box-shadow:0 22px 75px rgba(0,0,0,.44);
+    border-radius:0;
 }
 
 .content.fade{
     opacity:0;
-    transform:translateY(8px);
+    transform:translateY(6px);
 }
 
 .content::-webkit-scrollbar{
-    width:10px;
+    width:8px;
 }
 
 .content::-webkit-scrollbar-track{
@@ -607,95 +626,106 @@ body::after{
 }
 
 .content::-webkit-scrollbar-thumb{
-    background:rgba(255,255,255,.28);
-    border-radius:4px;
+    background:rgba(255,255,255,.24);
+    border-radius:0;
 }
 
 .page-title{
-    font-size:34px;
+    font-size:32px;
     font-weight:900;
     margin-bottom:10px;
     color:white;
     letter-spacing:-1px;
-    text-shadow:0 2px 14px rgba(0,0,0,.45);
 }
 
 .page-sub{
     color:var(--muted);
-    font-size:14px;
+    font-size:13px;
     line-height:1.7;
     margin-bottom:28px;
+    max-width:760px;
 }
 
 .grid{
     display:grid;
     grid-template-columns:repeat(3,minmax(0,1fr));
-    gap:16px;
+    gap:14px;
     margin-bottom:28px;
 }
 
 .card{
-    background:rgba(0,0,0,.34);
-    border:1px solid rgba(255,255,255,.20);
-    border-radius:5px;
+    background:rgba(255,255,255,.045);
+    border:1px solid rgba(255,255,255,.14);
+    border-radius:0;
     padding:18px;
-    transition:.18s ease;
+    transition:.16s ease;
+    position:relative;
+}
+
+.card::before{
+    content:"";
+    position:absolute;
+    left:0;
+    top:0;
+    width:34px;
+    height:1px;
+    background:var(--blue);
+    opacity:.7;
 }
 
 .card:hover{
-    background:rgba(0,0,0,.46);
-    border-color:rgba(157,228,255,.58);
-    transform:translateY(-1px);
+    background:rgba(255,255,255,.07);
+    border-color:rgba(159,231,255,.46);
 }
 
 .card-label{
     color:var(--muted);
-    font-size:12px;
-    letter-spacing:1.5px;
+    font-size:11px;
+    letter-spacing:1.8px;
     text-transform:uppercase;
     margin-bottom:10px;
 }
 
 .card-number{
     color:white;
-    font-size:30px;
+    font-size:29px;
     font-weight:900;
 }
 
 .card-text{
     color:var(--muted);
-    font-size:14px;
+    font-size:13px;
     line-height:1.6;
     margin-top:8px;
 }
 
 .line{
-    border-left:1px solid rgba(255,255,255,.34);
+    border-left:1px solid rgba(255,255,255,.26);
     padding-left:24px;
     max-width:980px;
 }
 
 input,
 textarea{
-    background:rgba(0,0,0,.36);
+    background:rgba(255,255,255,.045);
     color:white;
-    border:1px solid rgba(255,255,255,.34);
+    border:1px solid rgba(255,255,255,.22);
+    border-radius:0;
     padding:13px 14px;
     outline:none;
-    border-radius:4px;
     font-size:14px;
     backdrop-filter:blur(10px);
 }
 
 input::placeholder,
 textarea::placeholder{
-    color:rgba(255,255,255,.62);
+    color:rgba(255,255,255,.52);
 }
 
 input:focus,
 textarea:focus{
     border-color:var(--blue);
-    background:rgba(0,0,0,.48);
+    background:rgba(255,255,255,.07);
 }
 
 textarea{
@@ -710,29 +740,47 @@ textarea{
     margin-bottom:26px;
 }
 
-.row{
-    margin-bottom:16px;
-}
-
 .file-row,
 .topic-row,
 .credit-row,
 .comment-row{
-    margin-bottom:16px;
-    padding:16px 18px;
-    background:rgba(0,0,0,.34);
-    border:1px solid rgba(255,255,255,.22);
-    border-radius:5px;
-    transition:.18s ease;
+    margin-bottom:14px;
+    padding:15px 17px;
+    background:rgba(255,255,255,.045);
+    border:1px solid rgba(255,255,255,.13);
+    border-radius:0;
+    transition:.16s ease;
+    position:relative;
+}
+
+.file-row::before,
+.topic-row::before,
+.credit-row::before,
+.comment-row::before{
+    content:"";
+    position:absolute;
+    left:0;
+    top:0;
+    bottom:0;
+    width:1px;
+    background:rgba(159,231,255,.38);
+    opacity:0;
+    transition:.16s ease;
 }
 
 .file-row:hover,
 .topic-row:hover,
 .credit-row:hover,
 .comment-row:hover{
-    background:rgba(0,0,0,.46);
-    border-color:rgba(157,228,255,.58);
-    transform:translateY(-1px);
+    background:rgba(255,255,255,.07);
+    border-color:rgba(159,231,255,.38);
+}
+
+.file-row:hover::before,
+.topic-row:hover::before,
+.credit-row:hover::before,
+.comment-row:hover::before{
+    opacity:1;
 }
 
 .file-title,
@@ -749,7 +797,7 @@ textarea{
 .comment-meta,
 .small{
     color:var(--muted);
-    font-size:14px;
+    font-size:13px;
     line-height:1.7;
 }
 
@@ -758,9 +806,9 @@ textarea{
 .fake-link{
     color:var(--blue);
     text-decoration:none;
-    font-size:14px;
+    font-size:13px;
     word-break:break-all;
-    transition:.18s ease;
+    transition:.16s ease;
     cursor:pointer;
     font-weight:900;
 }
@@ -769,12 +817,12 @@ textarea{
 .topic-open:hover,
 .fake-link:hover{
     color:white;
-    padding-left:5px;
+    padding-left:4px;
 }
 
 .form-box{
-    margin-top:32px;
-    border-left:1px solid rgba(255,255,255,.34);
+    margin-top:30px;
+    border-left:1px solid rgba(255,255,255,.24);
     padding-left:24px;
     max-width:740px;
 }
@@ -787,14 +835,15 @@ button,
     gap:10px;
     background:#071827;
     color:white;
-    border:1px solid rgba(255,255,255,.28);
+    border:1px solid rgba(255,255,255,.22);
     padding:12px 18px;
-    border-radius:4px;
+    border-radius:0;
     cursor:pointer;
-    transition:.18s ease;
-    font-size:14px;
+    transition:.16s ease;
+    font-size:13px;
     text-decoration:none;
     font-weight:900;
+    letter-spacing:.4px;
     backdrop-filter:blur(10px);
 }
 
@@ -802,7 +851,6 @@ button:hover,
 .file-button:hover{
     background:#102b43;
     border-color:var(--blue);
-    transform:translateY(-1px);
 }
 
 .primary-btn{
@@ -819,15 +867,15 @@ button:hover,
 .login-card,
 .account-box{
     width:430px;
-    background:rgba(0,0,0,.38);
-    border:1px solid rgba(255,255,255,.28);
-    border-radius:5px;
+    background:rgba(255,255,255,.045);
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:0;
     padding:28px;
-    box-shadow:0 20px 55px rgba(0,0,0,.35);
+    box-shadow:0 20px 55px rgba(0,0,0,.28);
 }
 
 .login-card-title{
-    font-size:25px;
+    font-size:24px;
     color:white;
     margin-bottom:8px;
     font-weight:900;
@@ -836,7 +884,7 @@ button:hover,
 
 .login-card-sub{
     color:var(--muted);
-    font-size:14px;
+    font-size:13px;
     margin-bottom:24px;
 }
 
@@ -853,23 +901,23 @@ button:hover,
 
 .selected-file{
     color:var(--muted);
-    font-size:14px;
+    font-size:13px;
     margin-left:10px;
 }
 
 .comment-row{
-    border-left:1px solid rgba(157,228,255,.42);
+    border-left:1px solid rgba(159,231,255,.32);
 }
 
 .account-section{
     margin-top:28px;
     padding-top:22px;
-    border-top:1px solid rgba(255,255,255,.22);
+    border-top:1px solid rgba(255,255,255,.16);
 }
 
 .credit-heading{
     color:white;
-    font-size:13px;
+    font-size:12px;
     letter-spacing:2.4px;
     margin:26px 0 16px;
     font-weight:900;
@@ -880,7 +928,7 @@ button:hover,
 }
 
 .credit-divider{
-    border-top:1px solid rgba(255,255,255,.28);
+    border-top:1px solid rgba(255,255,255,.22);
     width:280px;
     margin:24px 0;
 }
@@ -888,18 +936,19 @@ button:hover,
 .pill-row{
     display:flex;
     flex-wrap:wrap;
-    gap:10px;
+    gap:8px;
     margin-bottom:28px;
 }
 
 .pill{
     color:white;
-    background:rgba(255,255,255,.09);
-    border:1px solid rgba(255,255,255,.18);
-    padding:9px 12px;
-    border-radius:4px;
-    font-size:13px;
-    font-weight:800;
+    background:rgba(255,255,255,.055);
+    border:1px solid rgba(255,255,255,.14);
+    padding:8px 11px;
+    border-radius:0;
+    font-size:12px;
+    font-weight:900;
+    letter-spacing:.4px;
 }
 
 @media(max-width:900px){
@@ -1091,7 +1140,7 @@ function fadeChange(html){
         content.innerHTML=html;
         content.classList.remove("fade");
         bindFileInput();
-    },160);
+    },140);
 }
 
 function bindFileInput(){
@@ -1131,35 +1180,35 @@ function showDashboard(button){
     let html=`
         <div class="page-title">producer room</div>
         <div class="page-sub">
-            Upload ZIP packs, share MP3 previews, start discussions, and build a private funk producer space.
+            Minimal private space for ZIP packs, MP3 previews, discussions and producer notes.
         </div>
 
         <div class="grid">
             <div class="card">
-                <div class="card-label">uploaded files</div>
+                <div class="card-label">files</div>
                 <div class="card-number">${files.length}</div>
-                <div class="card-text">ZIP packs and MP3 previews shared by members.</div>
+                <div class="card-text">ZIP packs and MP3 previews.</div>
             </div>
 
             <div class="card">
                 <div class="card-label">topics</div>
                 <div class="card-number">${discussions.length}</div>
-                <div class="card-text">Producer questions, beat feedback and ideas.</div>
+                <div class="card-text">Feedback, questions and ideas.</div>
             </div>
 
             <div class="card">
                 <div class="card-label">comments</div>
                 <div class="card-number">${totalComments}</div>
-                <div class="card-text">Community replies and feedback.</div>
+                <div class="card-text">Replies from members.</div>
             </div>
         </div>
 
         <div class="pill-row">
-            <div class="pill">MTG ideas</div>
-            <div class="pill">FL Studio packs</div>
-            <div class="pill">Beat feedback</div>
-            <div class="pill">Producer chat</div>
-            <div class="pill">Brazil funk</div>
+            <div class="pill">MTG</div>
+            <div class="pill">FL Studio</div>
+            <div class="pill">Drum Kits</div>
+            <div class="pill">Beat Feedback</div>
+            <div class="pill">Brazil Funk</div>
         </div>
 
         <div class="line">
@@ -1175,7 +1224,7 @@ function showDashboard(button){
         html += `
             <div class="file-row">
                 <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">new file · ${escapeHtml(fileSizes[file] || "")}</div>
+                <div class="meta">file · ${escapeHtml(fileSizes[file] || "")}</div>
                 <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
             </div>
         `;
@@ -1195,11 +1244,8 @@ function showDashboard(button){
         </div>
 
         <div class="form-box">
-            <div class="topic-title">make it feel alive</div>
-            <p class="small">
-                Add daily challenges, recent uploads, trending packs, beat feedback posts, top producers, and small stats.
-                Empty pages feel dead. Cards, activity, and challenges make the site feel active.
-            </p>
+            <div class="topic-title">quick actions</div>
+            <p class="small">Upload a pack or start a topic to keep the room active.</p>
             <button onclick="showFiles(document.getElementById('menuFiles'))">upload file</button>
             <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">start discussion</button>
         </div>
