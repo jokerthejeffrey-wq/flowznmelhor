@@ -1,5 +1,3 @@
 Flask
-Flask-Mail
-Authlib
 Werkzeug
 gunicorn
