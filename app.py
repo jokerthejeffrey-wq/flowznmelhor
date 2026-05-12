@@ -3,13 +3,26 @@ import json
 import time
 import hashlib
 import secrets
+import zipfile
 from io import BytesIO
 from functools import wraps
 
 import requests
-from flask import Flask, render_template_string, request, redirect, url_for, session, flash, send_file, abort
+from flask import (
+    Flask,
+    render_template_string,
+    request,
+    redirect,
+    url_for,
+    session,
+    flash,
+    send_file,
+    abort,
+    jsonify
+)
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(64))
@@ -21,31 +34,57 @@ DISCORD_API = "https://discord.com/api/v10"
 MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", str(8 * 1024 * 1024)))
 MAX_DB_SIZE = int(os.environ.get("MAX_DB_SIZE", str(7 * 1024 * 1024)))
 
+POST_COOLDOWN_SECONDS = int(os.environ.get("POST_COOLDOWN_SECONDS", "30"))
+COMMENT_COOLDOWN_SECONDS = int(os.environ.get("COMMENT_COOLDOWN_SECONDS", "8"))
+
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
 ALLOWED_EXTENSIONS = {".zip", ".mp3"}
 ALLOWED_PFP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+DANGEROUS_ZIP_EXTENSIONS = {
+    ".exe", ".bat", ".cmd", ".scr", ".ps1", ".vbs", ".js", ".jar",
+    ".msi", ".dll", ".com", ".pif", ".lnk", ".reg", ".hta", ".apk",
+    ".sh", ".command", ".app"
+}
 
 CACHE_SECONDS = 2
 CACHE = {"time": 0, "store": None}
 
 CREDITS = {
     "OWNERS": ["DJ TUTTER", "DJ LIRA DA ZL"],
-    "MEMBERS": ["DJ FRG 011", "DJ PLT 011", "DJ RGLX", "DJ RDC", "DJ SABA 7", "DJ RE7 013", "RSFI", "DJ RDC"],
+    "MEMBERS": [
+        "DJ FRG 011",
+        "DJ PLT 011",
+        "DJ RGLX",
+        "DJ RDC",
+        "DJ SABA 7",
+        "DJ RE7 013",
+        "RSFI",
+        "DJ RDC"
+    ],
     "WEBSITE MADE BY": ["DJ SABA 7"]
 }
 
 
+# ============================================================
+# DISCORD DATABASE
+# ============================================================
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
 def blank_db():
     return {
-        "version": 4,
+        "version": 6,
         "users": {},
         "topics": {},
         "comments": {},
         "files": {},
         "dms": {},
-        "created_at": int(time.time()),
-        "updated_at": int(time.time())
+        "created_at": now_ms(),
+        "updated_at": now_ms()
     }
 
 
@@ -60,13 +99,21 @@ def normalize_db(db):
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 4
+    clean["version"] = 6
+
+    if "updated_at" not in clean:
+        clean["updated_at"] = now_ms()
+
+    if "created_at" not in clean:
+        clean["created_at"] = now_ms()
+
     return clean
 
 
 def require_discord_config():
     if not DISCORD_BOT_TOKEN:
         raise RuntimeError("Missing DISCORD_BOT_TOKEN in Render Environment.")
+
     if not DISCORD_DB_CHANNEL_ID:
         raise RuntimeError("Missing DISCORD_DB_CHANNEL_ID in Render Environment.")
 
@@ -75,17 +122,25 @@ def discord_request(method, endpoint, **kwargs):
     require_discord_config()
 
     url = endpoint if endpoint.startswith("http") else f"{DISCORD_API}{endpoint}"
+
     headers = kwargs.pop("headers", {})
     headers["Authorization"] = f"Bot {DISCORD_BOT_TOKEN}"
 
     for _ in range(5):
-        response = requests.request(method, url, headers=headers, timeout=45, **kwargs)
+        response = requests.request(
+            method,
+            url,
+            headers=headers,
+            timeout=45,
+            **kwargs
+        )
 
         if response.status_code == 429:
             try:
                 retry_after = float(response.json().get("retry_after", 1))
             except Exception:
                 retry_after = 1
+
             time.sleep(retry_after)
             continue
 
@@ -112,7 +167,12 @@ def fetch_discord_messages():
         if before:
             params["before"] = before
 
-        response = discord_request("GET", f"/channels/{DISCORD_DB_CHANNEL_ID}/messages", params=params)
+        response = discord_request(
+            "GET",
+            f"/channels/{DISCORD_DB_CHANNEL_ID}/messages",
+            params=params
+        )
+
         messages = response.json()
 
         if not messages:
@@ -142,7 +202,9 @@ def post_discord_text(content):
 def post_discord_attachment(content, filename, file_bytes, content_type):
     payload = {"content": content}
 
-    data = {"payload_json": json.dumps(payload)}
+    data = {
+        "payload_json": json.dumps(payload)
+    }
 
     files = {
         "files[0]": (
@@ -227,7 +289,7 @@ def load_store(force=False):
 
 def save_db(db):
     db = normalize_db(db)
-    db["updated_at"] = int(time.time())
+    db["updated_at"] = now_ms()
 
     raw = json.dumps(db, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
@@ -235,7 +297,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v4|{int(time.time())}",
+        content=f"SWDBSNAP|v6|{int(time.time())}",
         filename="smartweb-db.json",
         file_bytes=raw,
         content_type="application/json"
@@ -260,6 +322,10 @@ def save_profile_picture_to_discord(pfp_id, filename, file_bytes, content_type):
     )
 
 
+# ============================================================
+# HELPERS
+# ============================================================
+
 def user_id_from_email(email):
     return hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()
 
@@ -282,6 +348,108 @@ def size_text(size):
         return f"{size / (1024 * 1024):.1f} MB"
 
     return f"{size / 1024:.1f} KB"
+
+
+def cooldown_left(user, key, seconds):
+    last = int(user.get(key, 0))
+    now = int(time.time())
+    left = seconds - (now - last)
+    return max(0, left)
+
+
+def looks_like_mp3(file_bytes):
+    if len(file_bytes) < 4:
+        return False
+
+    if file_bytes[:3] == b"ID3":
+        return True
+
+    if file_bytes[0] == 0xFF and (file_bytes[1] & 0xE0) == 0xE0:
+        return True
+
+    return False
+
+
+def looks_like_image(filename, file_bytes):
+    ext = os.path.splitext(filename.lower())[1]
+
+    if ext == ".png":
+        return file_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+
+    if ext in [".jpg", ".jpeg"]:
+        return file_bytes.startswith(b"\xff\xd8\xff")
+
+    if ext == ".gif":
+        return file_bytes.startswith(b"GIF87a") or file_bytes.startswith(b"GIF89a")
+
+    if ext == ".webp":
+        return len(file_bytes) > 12 and file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP"
+
+    return False
+
+
+def scan_uploaded_file(filename, file_bytes):
+    ext = os.path.splitext(filename.lower())[1]
+
+    if ext == ".mp3":
+        if not looks_like_mp3(file_bytes):
+            return False, "This does not look like a real MP3 file."
+
+        return True, "MP3 passed basic safety check."
+
+    if ext == ".zip":
+        bio = BytesIO(file_bytes)
+
+        if not zipfile.is_zipfile(bio):
+            return False, "This does not look like a real ZIP file."
+
+        total_uncompressed = 0
+        max_uncompressed = 80 * 1024 * 1024
+        max_files = 200
+
+        try:
+            with zipfile.ZipFile(BytesIO(file_bytes)) as z:
+                infos = z.infolist()
+
+                if len(infos) > max_files:
+                    return False, "ZIP has too many files."
+
+                for info in infos:
+                    name = info.filename.replace("\\", "/")
+                    lower_name = name.lower()
+
+                    if name.startswith("/") or ".." in name.split("/"):
+                        return False, "ZIP contains unsafe file paths."
+
+                    inner_ext = os.path.splitext(lower_name)[1]
+
+                    if inner_ext in DANGEROUS_ZIP_EXTENSIONS:
+                        return False, f"ZIP contains a blocked dangerous file type: {inner_ext}"
+
+                    total_uncompressed += int(info.file_size)
+
+                    if total_uncompressed > max_uncompressed:
+                        return False, "ZIP is too large when extracted."
+
+                    if info.compress_size > 0:
+                        ratio = info.file_size / max(info.compress_size, 1)
+
+                        if ratio > 120:
+                            return False, "ZIP looks like a zip bomb."
+
+        except Exception:
+            return False, "ZIP could not be scanned."
+
+        return True, "ZIP passed basic safety check."
+
+    return False, "Only ZIP and MP3 files are allowed."
+
+
+def scan_profile_picture(filename, file_bytes):
+    if not looks_like_image(filename, file_bytes):
+        return False, "This does not look like a real image file."
+
+    return True, "Image passed basic safety check."
 
 
 def current_email():
@@ -373,21 +541,27 @@ def login_required(func):
     return wrapper
 
 
-def go(view="dashboard", topic_id=None):
-    if topic_id:
-        return redirect(url_for("home", view=view, id=topic_id))
+def go(view="dashboard", item_id=None):
+    if item_id:
+        return redirect(url_for("home", view=view, id=item_id))
 
     return redirect(url_for("home", view=view))
 
 
 def public_file(file_data, db=None):
+    name = file_data.get("original_name", "file")
+    ext = os.path.splitext(name.lower())[1]
+    file_id = file_data.get("id", "")
+
     return {
-        "id": file_data.get("id", ""),
-        "name": file_data.get("original_name", "file"),
+        "id": file_id,
+        "name": name,
         "size": size_text(file_data.get("size", 0)),
         "author": username_from_id(file_data.get("author_id", ""), db, file_data.get("author", "unknown")),
         "author_id": file_data.get("author_id", ""),
         "created": int(file_data.get("created", 0)),
+        "is_audio": ext == ".mp3",
+        "stream_url": url_for("stream_file", file_id=file_id) if ext == ".mp3" else ""
     }
 
 
@@ -461,6 +635,126 @@ def public_dm_messages(db, current_id):
     return messages
 
 
+def public_notifications(db, current_id):
+    user = db["users"].get(current_id, {})
+    last_seen = int(user.get("last_seen_notifications", 0))
+    items = []
+
+    for dm in db["dms"].values():
+        created = int(dm.get("created", 0))
+
+        if dm.get("to") == current_id and dm.get("from") != current_id:
+            sender = db["users"].get(dm.get("from", ""), {})
+
+            items.append({
+                "id": dm.get("id", ""),
+                "type": "dm",
+                "title": f"New message from {sender.get('username', 'unknown')}",
+                "body": dm.get("body", "")[:160],
+                "from_id": dm.get("from", ""),
+                "target_id": dm.get("from", ""),
+                "created": created,
+                "unread": created > last_seen
+            })
+
+    my_topic_ids = {
+        topic_id
+        for topic_id, topic in db["topics"].items()
+        if topic.get("author_id") == current_id
+    }
+
+    for comment in db["comments"].values():
+        created = int(comment.get("created", 0))
+        commenter_id = comment.get("author_id", "")
+
+        if comment.get("topic_id") in my_topic_ids and commenter_id != current_id:
+            commenter = db["users"].get(commenter_id, {})
+            topic = db["topics"].get(comment.get("topic_id", ""), {})
+
+            items.append({
+                "id": comment.get("id", ""),
+                "type": "comment",
+                "title": f"{commenter.get('username', 'unknown')} commented on your post",
+                "body": topic.get("title", "discussion"),
+                "from_id": commenter_id,
+                "target_id": comment.get("topic_id", ""),
+                "created": created,
+                "unread": created > last_seen
+            })
+
+    for topic in db["topics"].values():
+        created = int(topic.get("created", 0))
+
+        if topic.get("author_id") != current_id:
+            author = db["users"].get(topic.get("author_id", ""), {})
+
+            items.append({
+                "id": topic.get("id", ""),
+                "type": "topic",
+                "title": f"{author.get('username', 'unknown')} made a new post",
+                "body": topic.get("title", "")[:160],
+                "from_id": topic.get("author_id", ""),
+                "target_id": topic.get("id", ""),
+                "created": created,
+                "unread": created > last_seen
+            })
+
+    for file_data in db["files"].values():
+        created = int(file_data.get("created", 0))
+
+        if file_data.get("author_id") != current_id:
+            author = db["users"].get(file_data.get("author_id", ""), {})
+
+            items.append({
+                "id": file_data.get("id", ""),
+                "type": "file",
+                "title": f"{author.get('username', 'unknown')} uploaded a file",
+                "body": file_data.get("original_name", "file")[:160],
+                "from_id": file_data.get("author_id", ""),
+                "target_id": file_data.get("id", ""),
+                "created": created,
+                "unread": created > last_seen
+            })
+
+    items.sort(key=lambda x: x["created"], reverse=True)
+    return items[:50]
+
+
+def build_client_state(db, store, user):
+    current_id = user.get("id", "")
+
+    files = [public_file(file_data, db) for file_data in db["files"].values()]
+    files.sort(key=lambda x: x["created"], reverse=True)
+
+    topics = [public_topic(topic_data, db) for topic_data in db["topics"].values()]
+    topics.sort(key=lambda x: x["created"], reverse=True)
+
+    public_users = [
+        public_user(user_data, db, store, current_id)
+        for user_data in db["users"].values()
+    ]
+    public_users.sort(key=lambda x: x["username"].lower())
+
+    notifications = public_notifications(db, current_id)
+    unread_count = len([n for n in notifications if n.get("unread")])
+
+    return {
+        "files": files,
+        "topics": topics,
+        "users": public_users,
+        "dm_messages": public_dm_messages(db, current_id),
+        "notifications": notifications,
+        "notification_count": unread_count,
+        "db_updated_at": int(db.get("updated_at", 0)),
+        "username": user.get("username", user.get("email", "")),
+        "pfp_url": pfp_url_from_user(user, store)
+    }
+
+
+# ============================================================
+# HTML
+# ============================================================
+
 HTML = """
 <!DOCTYPE html>
 <html>
@@ -501,7 +795,7 @@ body{
 }
 
 body::before{
-    content:"FLOWZNMELHOR   PRODUCER ROOM   DISCORD DATABASE   PRIVATE FILES   DIRECT MESSAGES   ";
+    content:"FLOWZNMELHOR   PRODUCER ROOM   DISCORD DATABASE   PRIVATE FILES   DIRECT MESSAGES   LIVE UPDATES   ";
     position:fixed;
     inset:0;
     white-space:pre-wrap;
@@ -1210,6 +1504,55 @@ button.login-btn.primary-btn:hover{
     background:rgba(255,255,255,.06);
 }
 
+.audio-player{
+    margin-top:14px;
+    padding:12px;
+    border:1px solid rgba(255,255,255,.16);
+    border-radius:8px;
+    background:rgba(255,255,255,.055);
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+}
+
+.audio-controls{
+    display:flex;
+    align-items:center;
+    gap:8px;
+}
+
+.audio-btn{
+    width:38px;
+    height:34px;
+    padding:0;
+    border-radius:6px;
+}
+
+.audio-range{
+    flex:1;
+    height:6px;
+    padding:0;
+    cursor:pointer;
+    accent-color:var(--blue);
+}
+
+.audio-time{
+    min-width:82px;
+    text-align:right;
+    color:var(--muted);
+    font-size:12px;
+    font-weight:900;
+}
+
+.live-dot{
+    display:inline-block;
+    width:7px;
+    height:7px;
+    border-radius:50%;
+    background:#43e88b;
+    margin-left:8px;
+    box-shadow:0 0 12px rgba(67,232,139,.85);
+}
+
 @media(max-width:900px){
     body{overflow:auto}
     .app{height:auto;min-height:100vh;flex-direction:column}
@@ -1319,7 +1662,9 @@ button.login-btn.primary-btn:hover{
             <div class="item" id="menuDiscussion" onclick="showDiscussion(this)">discussion</div>
             <div class="item" id="menuDMs" onclick="showDMList(this)">messages</div>
             <div class="item" id="menuUsers" onclick="showUsers(this)">profiles</div>
-            <div class="item" id="menuNotifications" onclick="showNotifications(this)">notifications <span style="color:#9fe7ff">0</span></div>
+            <div class="item" id="menuNotifications" onclick="showNotifications(this)">
+                notifications <span id="notificationBadge" style="color:#9fe7ff">{{ notification_count }}</span>
+            </div>
         </div>
 
         <div class="menu-bottom">
@@ -1350,18 +1695,25 @@ button.login-btn.primary-btn:hover{
 {% endif %}
 
 <script>
-const files = {{ files|tojson }};
+let files = {{ files|tojson }};
 const credits = {{ credits|tojson }};
-const discussions = {{ topics|tojson }};
-const users = {{ users|tojson }};
-const dmMessages = {{ dm_messages|tojson }};
+let discussions = {{ topics|tojson }};
+let users = {{ users|tojson }};
+let dmMessages = {{ dm_messages|tojson }};
+let notifications = {{ notifications|tojson }};
+let notificationCount = {{ notification_count|tojson }};
+let dbUpdatedAt = {{ db_updated_at|tojson }};
+
 const userEmail = {{ user_email|tojson }};
 const username = {{ username|tojson }};
 const currentUserId = {{ current_user_id|tojson }};
 const pfpUrl = {{ pfp_url|tojson }};
 const startView = {{ start_view|tojson }};
-const startTopicId = {{ start_topic_id|tojson }};
+const startTopicId = {{ start_item_id|tojson }};
 const maxFileMb = {{ max_file_mb|tojson }};
+
+let currentView = startView || "dashboard";
+let currentViewId = startTopicId || "";
 
 function clickEffect(el){
     if(!el) return;
@@ -1386,6 +1738,7 @@ function fadeChange(html){
         content.classList.remove("fade");
         bindFileInput();
         bindPfpInput();
+        bindAudioPlayers();
     },160);
 }
 
@@ -1416,6 +1769,9 @@ function clearActive(){
 }
 
 function setUrl(view, id=null){
+    currentView = view;
+    currentViewId = id || "";
+
     if(id){
         window.history.replaceState(null, "", "/?view=" + encodeURIComponent(view) + "&id=" + encodeURIComponent(id));
     }else{
@@ -1431,6 +1787,7 @@ function smallPfp(user){
     if(user && user.pfp_url){
         return `<div class="pfp-box"><img src="${escapeAttr(user.pfp_url)}" alt="pfp"></div>`;
     }
+
     const letter = user && user.username ? user.username.charAt(0).toUpperCase() : "?";
     return `<div class="pfp-box">${escapeHtml(letter)}</div>`;
 }
@@ -1439,6 +1796,7 @@ function pfpHtml(){
     if(pfpUrl){
         return `<div class="pfp-box"><img src="${escapeAttr(pfpUrl)}" alt="pfp"></div>`;
     }
+
     return `<div class="pfp-box">${escapeHtml(username.charAt(0).toUpperCase())}</div>`;
 }
 
@@ -1446,6 +1804,90 @@ function nameLink(userId, fallback){
     const u = userById(userId);
     const name = u ? u.username : fallback;
     return `<span class="name-link" onclick="openProfile('${escapeAttr(userId)}')">${escapeHtml(name)}</span>`;
+}
+
+function formatAudioTime(seconds){
+    if(!Number.isFinite(seconds)) return "0:00";
+
+    seconds = Math.floor(seconds);
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+
+    return m + ":" + String(s).padStart(2, "0");
+}
+
+function audioPlayerHtml(file){
+    if(!file.is_audio) return "";
+
+    return `
+        <div class="audio-player" data-audio-player>
+            <audio preload="metadata" src="${escapeAttr(file.stream_url)}"></audio>
+
+            <div class="audio-controls">
+                <button type="button" class="audio-btn" data-play>▶</button>
+                <button type="button" class="audio-btn" data-pause>⏸</button>
+                <button type="button" class="audio-btn" data-stop>■</button>
+
+                <input class="audio-range" type="range" value="0" min="0" max="100" step="0.1">
+
+                <div class="audio-time" data-time>0:00 / 0:00</div>
+            </div>
+        </div>
+    `;
+}
+
+function bindAudioPlayers(){
+    document.querySelectorAll("[data-audio-player]").forEach(player=>{
+        if(player.dataset.bound === "1") return;
+
+        player.dataset.bound = "1";
+
+        const audio = player.querySelector("audio");
+        const playBtn = player.querySelector("[data-play]");
+        const pauseBtn = player.querySelector("[data-pause]");
+        const stopBtn = player.querySelector("[data-stop]");
+        const range = player.querySelector(".audio-range");
+        const timeText = player.querySelector("[data-time]");
+
+        function update(){
+            const duration = audio.duration || 0;
+            const current = audio.currentTime || 0;
+            const percent = duration > 0 ? (current / duration) * 100 : 0;
+
+            range.value = percent;
+            timeText.textContent = `${formatAudioTime(current)} / ${formatAudioTime(duration)}`;
+        }
+
+        playBtn.addEventListener("click", ()=>{
+            document.querySelectorAll("audio").forEach(a=>{
+                if(a !== audio) a.pause();
+            });
+
+            audio.play().catch(()=>{});
+        });
+
+        pauseBtn.addEventListener("click", ()=>{
+            audio.pause();
+        });
+
+        stopBtn.addEventListener("click", ()=>{
+            audio.pause();
+            audio.currentTime = 0;
+            update();
+        });
+
+        range.addEventListener("input", ()=>{
+            if(audio.duration){
+                audio.currentTime = (Number(range.value) / 100) * audio.duration;
+            }
+        });
+
+        audio.addEventListener("loadedmetadata", update);
+        audio.addEventListener("timeupdate", update);
+        audio.addEventListener("ended", update);
+
+        update();
+    });
 }
 
 function showDashboard(button){
@@ -1460,7 +1902,7 @@ function showDashboard(button){
     const recentFiles = files.slice(0,3);
 
     let html=`
-        <div class="page-title">producer room</div>
+        <div class="page-title">producer room <span class="live-dot"></span></div>
         <div class="page-sub">Upload ZIP packs, share MP3 previews, start discussions, and build a private funk producer space.</div>
 
         <div class="grid">
@@ -1498,6 +1940,7 @@ function showDashboard(button){
                 <div class="file-title">${escapeHtml(file.name)}</div>
                 <div class="meta">new file · ${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)}</div>
                 <a class="file-link" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
+                ${audioPlayerHtml(file)}
             </div>
         `;
     });
@@ -1535,7 +1978,7 @@ function showFiles(button){
 
     let html=`
         <div class="page-title">files</div>
-        <div class="page-sub">Upload ZIP packs or MP3 previews. Use ZIP for FLP, stems, drum kits and folders.</div>
+        <div class="page-sub">Upload ZIP packs or MP3 previews. MP3 files can be played directly here.</div>
 
         <input id="searchInput" class="search-bar" placeholder="search files" oninput="filterFiles()">
 
@@ -1552,6 +1995,7 @@ function showFiles(button){
                 <div class="file-title">${escapeHtml(file.name)}</div>
                 <div class="meta">${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)}</div>
                 <a class="file-link" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
+                ${audioPlayerHtml(file)}
             </div>
         `;
     });
@@ -1567,7 +2011,7 @@ function showFiles(button){
                 <br><br>
                 <button class="primary-btn" type="submit">upload file</button>
             </form>
-            <p class="small">allowed: zip and mp3 only. maximum size: ${maxFileMb} MB.</p>
+            <p class="small">allowed: zip and mp3 only. maximum size: ${maxFileMb} MB. files are checked with basic no-api safety scan.</p>
         </div>
     `;
 
@@ -1630,11 +2074,15 @@ function showDiscussion(button){
                 <br><br>
                 <button class="primary-btn" type="submit">add topic</button>
             </form>
+            <p class="small">post cooldown: ${POST_COOLDOWN_TEXT}</p>
         </div>
     `;
 
     fadeChange(html);
 }
+
+const POST_COOLDOWN_TEXT = "{{ post_cooldown }} seconds";
+const COMMENT_COOLDOWN_TEXT = "{{ comment_cooldown }} seconds";
 
 function filterDiscussions(){
     const input=document.getElementById("discussionSearchInput");
@@ -1704,6 +2152,7 @@ function openTopic(topicId){
                 <br><br>
                 <button class="primary-btn" type="submit">add comment</button>
             </form>
+            <p class="small">comment cooldown: ${COMMENT_COOLDOWN_TEXT}</p>
         </div>
     `;
 
@@ -1746,6 +2195,7 @@ function showUsers(button){
 function filterUsers(){
     const input=document.getElementById("userSearchInput");
     if(!input) return;
+
     const search=input.value.toLowerCase();
 
     document.querySelectorAll(".user-row").forEach(row=>{
@@ -1869,6 +2319,7 @@ function openDm(otherId){
 
     setUrl("dm", otherId);
     clearActive();
+
     const dmButton=document.getElementById("menuDMs");
     if(dmButton) dmButton.classList.add("active");
 
@@ -1982,7 +2433,7 @@ function showAccount(button){
                 </div>
 
                 <div class="account-section">
-                    <a class="login-btn" href="/logout" style="text-decoration:none;">logout</a>
+                    <a class="login-btn" href="/logout">logout</a>
                 </div>
             </div>
         </div>
@@ -2000,13 +2451,46 @@ function showNotifications(button){
 
     let html=`
         <div class="page-title">notifications</div>
-        <div class="page-sub">No notifications yet.</div>
+        <div class="page-sub">Recent messages, comments, posts and file uploads.</div>
         <div class="line">
-            <div class="small">This section is ready for future likes, comments, mentions, and upload alerts.</div>
-        </div>
     `;
 
+    if(notifications.length === 0){
+        html += `<div class="small">No notifications yet.</div>`;
+    }
+
+    notifications.forEach(n=>{
+        let action = "";
+
+        if(n.type === "dm"){
+            action = `<div class="topic-open" onclick="openDm('${n.target_id}')">open message</div>`;
+        }else if(n.type === "comment"){
+            action = `<div class="topic-open" onclick="openTopic('${n.target_id}')">open discussion</div>`;
+        }else if(n.type === "topic"){
+            action = `<div class="topic-open" onclick="openTopic('${n.target_id}')">open post</div>`;
+        }else if(n.type === "file"){
+            action = `<div class="topic-open" onclick="showFiles(document.getElementById('menuFiles'))">open files</div>`;
+        }
+
+        html += `
+            <div class="topic-row">
+                <div class="topic-title">${n.unread ? "● " : ""}${escapeHtml(n.title)}</div>
+                <div class="small">${escapeHtml(n.body)}</div>
+                <br>
+                ${action}
+            </div>
+        `;
+    });
+
+    html += `</div>`;
+
     fadeChange(html);
+
+    fetch("/notifications-read", {method:"POST"}).then(()=>{
+        notificationCount = 0;
+        updateNotificationBadge();
+        notifications = notifications.map(n => ({...n, unread:false}));
+    }).catch(()=>{});
 }
 
 function showCredits(button){
@@ -2062,6 +2546,94 @@ function showCredits(button){
     fadeChange(html);
 }
 
+function updateNotificationBadge(){
+    const badge = document.getElementById("notificationBadge");
+
+    if(!badge) return;
+
+    badge.textContent = notificationCount;
+
+    if(notificationCount > 0){
+        badge.style.color = "#9fe7ff";
+        badge.style.textShadow = "0 0 12px rgba(167,236,255,.8)";
+    }else{
+        badge.style.color = "#9fe7ff";
+        badge.style.textShadow = "none";
+    }
+}
+
+function isUserTyping(){
+    const el = document.activeElement;
+
+    if(!el) return false;
+
+    const tag = el.tagName.toLowerCase();
+
+    return tag === "input" || tag === "textarea";
+}
+
+function rerenderCurrentView(){
+    if(isUserTyping()) return;
+
+    if(currentView === "files"){
+        showFiles(document.getElementById("menuFiles"));
+    }else if(currentView === "discussion"){
+        showDiscussion(document.getElementById("menuDiscussion"));
+    }else if(currentView === "topic" && currentViewId){
+        openTopic(currentViewId);
+    }else if(currentView === "profile" && currentViewId){
+        openProfile(currentViewId);
+    }else if(currentView === "dm" && currentViewId){
+        openDm(currentViewId);
+    }else if(currentView === "messages"){
+        showDMList(document.getElementById("menuDMs"));
+    }else if(currentView === "profiles"){
+        showUsers(document.getElementById("menuUsers"));
+    }else if(currentView === "account"){
+        showAccount(document.getElementById("menuAccount"));
+    }else if(currentView === "credits"){
+        showCredits(document.getElementById("menuCredits"));
+    }else if(currentView === "notifications"){
+        showNotifications(document.getElementById("menuNotifications"));
+    }else{
+        showDashboard(document.getElementById("menuDashboard"));
+    }
+}
+
+async function checkForUpdates(){
+    if(!userEmail) return;
+
+    try{
+        const res = await fetch("/live-state?t=" + Date.now(), {
+            cache: "no-store"
+        });
+
+        const data = await res.json();
+
+        if(!data.ok){
+            return;
+        }
+
+        if(data.db_updated_at !== dbUpdatedAt){
+            files = data.files;
+            discussions = data.topics;
+            users = data.users;
+            dmMessages = data.dm_messages;
+            notifications = data.notifications;
+            notificationCount = data.notification_count;
+            dbUpdatedAt = data.db_updated_at;
+
+            updateNotificationBadge();
+            rerenderCurrentView();
+        }
+
+    }catch(e){
+        console.log("live update failed", e);
+    }
+}
+
+setInterval(checkForUpdates, 3000);
+
 function escapeHtml(text){
     return String(text)
         .replaceAll("&","&amp;")
@@ -2077,6 +2649,8 @@ function escapeAttr(text){
 
 window.addEventListener("load", ()=>{
     if(!userEmail) return;
+
+    updateNotificationBadge();
 
     setTimeout(()=>{
         if(startView === "files"){
@@ -2111,6 +2685,10 @@ window.addEventListener("load", ()=>{
 """
 
 
+# ============================================================
+# ROUTES
+# ============================================================
+
 @app.route("/")
 def home():
     logged_in = bool(current_email())
@@ -2128,15 +2706,20 @@ def home():
             topics=[],
             users=[],
             dm_messages=[],
+            notifications=[],
+            notification_count=0,
+            db_updated_at=0,
             credits=CREDITS,
             user_email=None,
             username="",
             current_user_id="",
             pfp_url="",
             start_view=requested_view,
-            start_topic_id=requested_id,
+            start_item_id=requested_id,
             auth_mode=auth_mode,
-            max_file_mb=MAX_FILE_SIZE // (1024 * 1024)
+            max_file_mb=MAX_FILE_SIZE // (1024 * 1024),
+            post_cooldown=POST_COOLDOWN_SECONDS,
+            comment_cooldown=COMMENT_COOLDOWN_SECONDS
         )
 
     auth_mode = ""
@@ -2172,33 +2755,28 @@ def home():
         flash("Account not found. Please login again.", "error")
         return redirect(url_for("home", view="login"))
 
-    files = [public_file(file_data, db) for file_data in db["files"].values()]
-    files.sort(key=lambda x: x["created"], reverse=True)
-
-    topics = [public_topic(topic_data, db) for topic_data in db["topics"].values()]
-    topics.sort(key=lambda x: x["created"], reverse=True)
-
-    public_users = [
-        public_user(user_data, db, store, current_user_id())
-        for user_data in db["users"].values()
-    ]
-    public_users.sort(key=lambda x: x["username"].lower())
+    state = build_client_state(db, store, user)
 
     return render_template_string(
         HTML,
-        files=files,
-        topics=topics,
-        users=public_users,
-        dm_messages=public_dm_messages(db, current_user_id()),
+        files=state["files"],
+        topics=state["topics"],
+        users=state["users"],
+        dm_messages=state["dm_messages"],
+        notifications=state["notifications"],
+        notification_count=state["notification_count"],
+        db_updated_at=state["db_updated_at"],
         credits=CREDITS,
         user_email=user.get("email", ""),
         username=user.get("username", user.get("email", "")),
         current_user_id=user.get("id", ""),
         pfp_url=pfp_url_from_user(user, store),
         start_view=requested_view,
-        start_topic_id=requested_id,
+        start_item_id=requested_id,
         auth_mode=auth_mode,
-        max_file_mb=MAX_FILE_SIZE // (1024 * 1024)
+        max_file_mb=MAX_FILE_SIZE // (1024 * 1024),
+        post_cooldown=POST_COOLDOWN_SECONDS,
+        comment_cooldown=COMMENT_COOLDOWN_SECONDS
     )
 
 
@@ -2246,6 +2824,9 @@ def register():
         "pfp_id": "",
         "pfp_updated": 0,
         "about": "",
+        "last_seen_notifications": int(time.time()),
+        "last_topic_at": 0,
+        "last_comment_at": 0,
         "created": int(time.time())
     }
 
@@ -2441,6 +3022,12 @@ def change_pfp():
         flash("Profile picture is too large. Maximum size is 3 MB.", "error")
         return go("account")
 
+    safe, reason = scan_profile_picture(original_name, file_bytes)
+
+    if not safe:
+        flash(f"Profile picture blocked: {reason}", "error")
+        return go("account")
+
     pfp_id = secrets.token_hex(12)
 
     try:
@@ -2507,6 +3094,12 @@ def upload():
         flash(f"File too large. Max size is {MAX_FILE_SIZE // (1024 * 1024)} MB.", "error")
         return go("files")
 
+    safe, reason = scan_uploaded_file(original_name, file_bytes)
+
+    if not safe:
+        flash(f"Upload blocked: {reason}", "error")
+        return go("files")
+
     file_id = secrets.token_hex(12)
 
     try:
@@ -2538,7 +3131,7 @@ def upload():
         flash(f"File uploaded, but DB update failed: {e}", "error")
         return go("files")
 
-    flash("File uploaded successfully.", "success")
+    flash("File uploaded successfully. Basic safety check passed.", "success")
     return go("files")
 
 
@@ -2577,6 +3170,43 @@ def download(file_id):
         as_attachment=True,
         download_name=file_data.get("original_name", "download"),
         mimetype=file_data.get("content_type", "application/octet-stream")
+    )
+
+
+@app.route("/stream/<file_id>")
+@login_required
+def stream_file(file_id):
+    try:
+        store = load_store(force=True)
+        db = store["db"]
+        file_urls = store["file_urls"]
+    except Exception:
+        abort(404)
+
+    file_data = db["files"].get(file_id)
+
+    if not file_data:
+        abort(404)
+
+    if not file_data.get("original_name", "").lower().endswith(".mp3"):
+        abort(404)
+
+    file_url = file_urls.get(file_id, {}).get("url")
+
+    if not file_url:
+        abort(404)
+
+    try:
+        response = requests.get(file_url, timeout=60)
+        response.raise_for_status()
+    except Exception:
+        abort(404)
+
+    return send_file(
+        BytesIO(response.content),
+        mimetype="audio/mpeg",
+        as_attachment=False,
+        download_name=file_data.get("original_name", "audio.mp3")
     )
 
 
@@ -2628,6 +3258,12 @@ def add_topic():
         flash("Account not found.", "error")
         return redirect(url_for("home", view="login"))
 
+    left = cooldown_left(user, "last_topic_at", POST_COOLDOWN_SECONDS)
+
+    if left > 0:
+        flash(f"Slow down. You can make another post in {left} seconds.", "error")
+        return go("discussion")
+
     title = request.form.get("title", "").strip()
     body = request.form.get("body", "").strip()
 
@@ -2647,6 +3283,8 @@ def add_topic():
     }
 
     db["topics"][topic_id] = topic
+    user["last_topic_at"] = int(time.time())
+    db["users"][user["id"]] = user
 
     try:
         save_db(db)
@@ -2674,6 +3312,12 @@ def add_comment(topic_id):
         flash("Topic not found.", "error")
         return go("discussion")
 
+    left = cooldown_left(user, "last_comment_at", COMMENT_COOLDOWN_SECONDS)
+
+    if left > 0:
+        flash(f"Slow down. You can comment again in {left} seconds.", "error")
+        return go("topic", topic_id)
+
     body = request.form.get("body", "").strip()
 
     if not body:
@@ -2692,6 +3336,8 @@ def add_comment(topic_id):
     }
 
     db["comments"][comment_id] = comment
+    user["last_comment_at"] = int(time.time())
+    db["users"][user["id"]] = user
 
     try:
         save_db(db)
@@ -2789,6 +3435,48 @@ def send_dm(target_id):
     return go("dm", target_id)
 
 
+@app.route("/live-state")
+@login_required
+def live_state():
+    try:
+        store = load_store(force=True)
+        db = store["db"]
+        user = db["users"].get(current_user_id())
+
+        if not user:
+            return jsonify({"ok": False, "error": "Account not found"}), 401
+
+        state = build_client_state(db, store, user)
+        state["ok"] = True
+        return jsonify(state)
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/notifications-read", methods=["POST"])
+@login_required
+def notifications_read():
+    try:
+        store = load_store(force=True)
+        db = store["db"]
+        user = db["users"].get(current_user_id())
+
+        if not user:
+            return jsonify({"ok": False, "error": "Account not found"}), 401
+
+        user["last_seen_notifications"] = int(time.time())
+        user["updated_at"] = int(time.time())
+        db["users"][user["id"]] = user
+
+        save_db(db)
+
+        return jsonify({"ok": True})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/discord-test")
 def discord_test():
     try:
@@ -2808,6 +3496,7 @@ def discord_test():
             f"DMs: {len(db['dms'])}<br>"
             "Test message sent."
         )
+
     except Exception as e:
         return f"DISCORD DATABASE ERROR: {e}"
 
