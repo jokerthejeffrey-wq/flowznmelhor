@@ -1095,8 +1095,48 @@ button:hover,.file-button:hover{
 
 .login-btn{
     width:100%;
-    margin-bottom:12px;
     height:46px;
+    margin-bottom:12px;
+}
+
+button.login-btn,
+a.login-btn{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:rgba(7,24,39,.58);
+    color:white;
+    border:1px solid rgba(255,255,255,.24);
+    border-radius:6px;
+    cursor:pointer;
+    transition:.18s ease;
+    font-size:14px;
+    font-weight:900;
+    text-decoration:none;
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+    text-shadow:0 2px 10px rgba(0,0,0,.55);
+}
+
+button.login-btn:hover,
+a.login-btn:hover{
+    background:rgba(16,43,67,.72);
+    border-color:var(--blue);
+    transform:translateY(-1px);
+    box-shadow:0 0 22px rgba(167,236,255,.13);
+    color:white;
+}
+
+button.login-btn.primary-btn{
+    background:rgba(255,255,255,.92);
+    color:#06101d;
+    border-color:white;
+    text-shadow:none;
+}
+
+button.login-btn.primary-btn:hover{
+    background:white;
+    color:#000;
 }
 
 .login-input{
