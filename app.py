@@ -1188,7 +1188,7 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>FlowZNmelhor</title>
+<title>FunkFile</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
@@ -1362,7 +1362,7 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 
 <div class="login-only">
     <div class="login-shell">
-        <div class="login-logo">FLOWZNMELHOR</div>
+        <div class="login-logo">FUNKFILE</div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -1416,7 +1416,7 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 
 <div class="app">
     <div class="side">
-        <div class="title">FLOWZNMELHOR</div>
+        <div class="title">FUNKFILE</div>
 
         <div class="user-mini" onclick="showAccount(document.getElementById('menuAccount'))" style="cursor:pointer;">
             <div class="pfp-box">
