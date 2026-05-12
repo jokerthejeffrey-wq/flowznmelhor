@@ -2186,14 +2186,51 @@ def register():
         flash("Password must be at least 6 characters.", "error")
         return redirect(url_for("home", view="register"))
 
+    # IMPORTANT FIX:
+    # No verification system anymore. If this email already exists in the Discord DB,
+    # do NOT block the user with "Account already exists".
+    # Open/restore that existing account, update the username/password from this form,
+    # save the DB, and enter the main page.
+    existing_uid, existing_user = find_user_by_email(db, email)
+
+    if existing_user:
+        # The same email can keep its own username, but cannot steal another user's username.
+        for other_id, other_user in list(db["users"].items()):
+            if other_id == existing_uid:
+                continue
+            if other_user.get("username", "").strip().lower() == username.lower():
+                flash("Username already exists. Choose another one.", "error")
+                return redirect(url_for("home", view="register"))
+
+        existing_user["id"] = existing_uid
+        existing_user["username"] = username
+        existing_user["email"] = email
+        existing_user["password_hash"] = generate_password_hash(password)
+        existing_user["email_verified"] = True
+        existing_user.setdefault("pfp_id", "")
+        existing_user.setdefault("pfp_updated", 0)
+        existing_user.setdefault("about", "")
+        existing_user.setdefault("last_seen_notifications", int(time.time()))
+        existing_user.setdefault("last_topic_at", 0)
+        existing_user.setdefault("last_comment_at", 0)
+        existing_user.setdefault("created", int(time.time()))
+        existing_user["updated_at"] = int(time.time())
+        db["users"][existing_uid] = existing_user
+
+        try:
+            save_db(db)
+        except Exception as e:
+            flash(f"Could not update existing account in Discord DB: {e}", "error")
+            return redirect(url_for("home", view="register"))
+
+        session["email"] = email
+        session["user_id"] = existing_uid
+        flash("Account opened successfully.", "success")
+        return go("dashboard")
+
+    # New email: only block username if another account already uses it.
     for existing_id, existing_user in list(db["users"].items()):
-        existing_email = normalize_email(existing_user.get("email", ""))
         existing_username = existing_user.get("username", "").strip().lower()
-
-        if existing_email == email:
-            flash("Account already exists. Please login instead.", "error")
-            return redirect(url_for("home", view="login"))
-
         if existing_username == username.lower():
             flash("Username already exists. Choose another one.", "error")
             return redirect(url_for("home", view="register"))
@@ -2205,6 +2242,7 @@ def register():
         "username": username,
         "email": email,
         "password_hash": generate_password_hash(password),
+        "email_verified": True,
         "pfp_id": "",
         "pfp_updated": 0,
         "about": "",
@@ -2212,6 +2250,7 @@ def register():
         "last_topic_at": 0,
         "last_comment_at": 0,
         "created": int(time.time()),
+        "updated_at": int(time.time()),
     }
 
     db["users"][user_id] = user
