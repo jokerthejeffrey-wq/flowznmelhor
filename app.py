@@ -1379,7 +1379,7 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>producer-room</title>
+<title>Cratevio</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
@@ -1553,7 +1553,7 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 
 <div class="login-only">
     <div class="login-shell">
-        <div class="login-logo">PRODUCER-ROOM</div>
+        <div class="login-logo">CRATEVIO</div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -1607,7 +1607,7 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 
 <div class="app">
     <div class="side">
-        <div class="title">PRODUCER-ROOM</div>
+        <div class="title">CRATEVIO</div>
 
         <div class="user-mini" onclick="showAccount(document.getElementById('menuAccount'))" style="cursor:pointer;">
             <div class="pfp-box">
