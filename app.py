@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -6,10 +5,8 @@ import time
 import hashlib
 import secrets
 import zipfile
-import smtplib
 from io import BytesIO
 from functools import wraps
-from email.message import EmailMessage
 
 import requests
 from flask import (
@@ -35,17 +32,11 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 DISCORD_DB_CHANNEL_ID = os.environ.get("DISCORD_DB_CHANNEL_ID", "").strip()
 DISCORD_API = "https://discord.com/api/v10"
 
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com").strip()
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "").strip()
-MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "").strip()
-MAIL_FROM = os.environ.get("MAIL_FROM", MAIL_USERNAME).strip()
 
 MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", str(8 * 1024 * 1024)))
 MAX_DB_SIZE = int(os.environ.get("MAX_DB_SIZE", str(7 * 1024 * 1024)))
 POST_COOLDOWN_SECONDS = int(os.environ.get("POST_COOLDOWN_SECONDS", "30"))
 COMMENT_COOLDOWN_SECONDS = int(os.environ.get("COMMENT_COOLDOWN_SECONDS", "8"))
-EMAIL_CODE_EXPIRE_SECONDS = 10 * 60
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
@@ -97,7 +88,7 @@ def now_ms():
 
 def blank_db():
     return {
-        "version": 8,
+        "version": 12,
         "users": {},
         "topics": {},
         "comments": {},
@@ -119,7 +110,7 @@ def normalize_db(db):
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 8
+    clean["version"] = 12
     clean.setdefault("created_at", now_ms())
     clean.setdefault("updated_at", now_ms())
     return clean
@@ -214,6 +205,7 @@ def load_store(force=False):
         return CACHE["store"]
 
     messages = fetch_discord_messages()
+    messages.sort(key=lambda m: int(m.get("id", 0)), reverse=True)
 
     db = blank_db()
     file_urls = {}
@@ -277,7 +269,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v8|{int(time.time())}",
+        content=f"SWDBSNAP|v12|{int(time.time())}",
         filename="smartweb-db.json",
         file_bytes=raw,
         content_type="application/json",
@@ -357,40 +349,44 @@ def validate_email_basic(email):
     return True, "Email accepted."
 
 
-def require_mail_config():
-    if not MAIL_USERNAME:
-        raise RuntimeError("Missing MAIL_USERNAME in Render Environment.")
-    if not MAIL_PASSWORD:
-        raise RuntimeError("Missing MAIL_PASSWORD in Render Environment.")
-    if not MAIL_FROM:
-        raise RuntimeError("Missing MAIL_FROM in Render Environment.")
-
-
-def send_verification_email(to_email, code):
-    require_mail_config()
-
-    msg = EmailMessage()
-    msg["Subject"] = "Your FlowZNmelhor verification code"
-    msg["From"] = MAIL_FROM
-    msg["To"] = to_email
-    msg.set_content(
-        f"Your verification code is: {code}\n\n"
-        "This code expires in 10 minutes.\n\n"
-        "If this was not you, ignore this email."
-    )
-
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=25) as server:
-        server.starttls()
-        server.login(MAIL_USERNAME, MAIL_PASSWORD)
-        server.send_message(msg)
-
-
-def code_hash(code):
-    return hashlib.sha256(str(code).encode("utf-8")).hexdigest()
-
-
 def user_id_from_email(email):
     return hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()
+
+
+def find_user_by_email(db, email):
+    """
+    Finds accounts by the saved email value instead of only trusting the user dict key.
+    This fixes old Discord snapshots where the user id/key was generated differently.
+    """
+    email = normalize_email(email)
+    if not email:
+        return None, None
+
+    for uid, user in db.get("users", {}).items():
+        if normalize_email(user.get("email", "")) == email:
+            if not user.get("id"):
+                user["id"] = uid
+            return uid, user
+
+    legacy_id = user_id_from_email(email)
+    user = db.get("users", {}).get(legacy_id)
+    if user:
+        if not user.get("id"):
+            user["id"] = legacy_id
+        return legacy_id, user
+
+    return None, None
+
+
+def password_matches(saved_hash, password):
+    if not saved_hash:
+        return False
+
+    try:
+        return check_password_hash(saved_hash, password)
+    except Exception:
+        # Legacy fallback only: if an old test DB stored plain text by mistake.
+        return saved_hash == password
 
 
 def allowed_file(filename):
@@ -505,9 +501,22 @@ def current_email():
 
 
 def current_user_id():
+    if session.get("user_id"):
+        return session.get("user_id")
+
     email = current_email()
     if not email:
         return None
+
+    try:
+        db = load_store()["db"]
+        uid, user = find_user_by_email(db, email)
+        if uid:
+            session["user_id"] = uid
+            return uid
+    except Exception:
+        pass
+
     return user_id_from_email(email)
 
 
@@ -515,7 +524,18 @@ def current_user():
     uid = current_user_id()
     if not uid:
         return None
-    return load_store()["db"]["users"].get(uid)
+
+    db = load_store()["db"]
+    user = db["users"].get(uid)
+    if user:
+        return user
+
+    uid, user = find_user_by_email(db, current_email())
+    if uid and user:
+        session["user_id"] = uid
+        return user
+
+    return None
 
 
 def username_from_id(uid, db=None, fallback="unknown"):
@@ -526,7 +546,7 @@ def username_from_id(uid, db=None, fallback="unknown"):
         db = load_store()["db"]
 
     user = db["users"].get(uid)
-    if not user or user.get("email_verified") is not True:
+    if not user:
         return fallback
 
     return user.get("username", fallback)
@@ -573,13 +593,8 @@ def login_required(func):
 
         if not user:
             session.clear()
-            flash("Account not found. Please login again.", "error")
+            flash("Account not found in the Discord database. Please login again.", "error")
             return redirect(url_for("home", view="login"))
-
-        if user.get("email_verified") is not True:
-            session.clear()
-            flash("This account is old or unverified. Please register again with a real email.", "error")
-            return redirect(url_for("home", view="register"))
 
         return func(*args, **kwargs)
 
@@ -681,7 +696,7 @@ def public_notifications(db, current_id):
         created = int(dm.get("created", 0))
         if dm.get("to") == current_id and dm.get("from") != current_id:
             sender = db["users"].get(dm.get("from", ""), {})
-            if sender.get("email_verified") is True:
+            if sender:
                 items.append({
                     "id": dm.get("id", ""),
                     "type": "dm",
@@ -703,7 +718,7 @@ def public_notifications(db, current_id):
             commenter = db["users"].get(commenter_id, {})
             topic = db["topics"].get(comment.get("topic_id", ""), {})
 
-            if commenter.get("email_verified") is True:
+            if commenter:
                 items.append({
                     "id": comment.get("id", ""),
                     "type": "comment",
@@ -719,7 +734,7 @@ def public_notifications(db, current_id):
         created = int(topic.get("created", 0))
         author_id = topic.get("author_id", "")
         author = db["users"].get(author_id, {})
-        if author_id != current_id and author.get("email_verified") is True:
+        if author_id != current_id and author:
             items.append({
                 "id": topic.get("id", ""),
                 "type": "topic",
@@ -735,7 +750,7 @@ def public_notifications(db, current_id):
         created = int(file_data.get("created", 0))
         author_id = file_data.get("author_id", "")
         author = db["users"].get(author_id, {})
-        if author_id != current_id and author.get("email_verified") is True:
+        if author_id != current_id and author:
             items.append({
                 "id": file_data.get("id", ""),
                 "type": "file",
@@ -754,13 +769,13 @@ def public_notifications(db, current_id):
 def build_client_state(db, store, user):
     current_id = user.get("id", "")
 
-    verified_users = {
+    visible_users = {
         uid: data for uid, data in db["users"].items()
-        if data.get("email_verified") is True
+        if isinstance(data, dict) and data.get("email")
     }
 
     visible_db = dict(db)
-    visible_db["users"] = verified_users
+    visible_db["users"] = visible_users
 
     files = [public_file(file_data, visible_db) for file_data in db["files"].values()]
     files.sort(key=lambda x: x["created"], reverse=True)
@@ -768,7 +783,7 @@ def build_client_state(db, store, user):
     topics = [public_topic(topic_data, visible_db) for topic_data in db["topics"].values()]
     topics.sort(key=lambda x: x["created"], reverse=True)
 
-    public_users = [public_user(user_data, visible_db, store, current_id) for user_data in verified_users.values()]
+    public_users = [public_user(user_data, visible_db, store, current_id) for user_data in visible_users.values()]
     public_users.sort(key=lambda x: x["username"].lower())
 
     notifications = public_notifications(db, current_id)
@@ -975,32 +990,15 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
                 {% endif %}
             {% endif %}
         {% endwith %}
-
-        {% if auth_mode == "verify" %}
-            <div class="login-title">Verify email</div>
-            <div class="login-sub">Enter the code sent to your email. Account will only be created after this.</div>
-
-            <form action="/verify-email" method="POST">
-                <div class="login-input-wrap">
-                    <input name="code" placeholder="Verification code" required>
-                </div>
-                <button class="btn btn-white" type="submit">Verify Email</button>
-            </form>
-
-            <div class="login-line"></div>
-            <button class="btn btn-dark" onclick="location.href='/resend-code'">Resend Code</button>
-            <br><br>
-            <button class="btn btn-dark" onclick="location.href='/cancel-verification'">Cancel</button>
-
-        {% elif auth_mode == "register" %}
+        {% if auth_mode == "register" %}
             <div class="login-title">Create account</div>
-            <div class="login-sub">Use a real working email. The site creates the account only after email code verification.</div>
+            <div class="login-sub">Create your account instantly. No email code is needed.</div>
 
             <form action="/register" method="POST">
                 <div class="login-input-wrap"><input name="username" placeholder="Username" required></div>
-                <div class="login-input-wrap"><input name="email" type="email" placeholder="Real email" required></div>
+                <div class="login-input-wrap"><input name="email" type="email" placeholder="Email" required></div>
                 <div class="login-input-wrap"><input name="password" type="password" placeholder="Password" required></div>
-                <button class="btn btn-white" type="submit">Send Verification Code</button>
+                <button class="btn btn-white" type="submit">Create Account</button>
             </form>
 
             <div class="login-line"></div>
@@ -1960,9 +1958,7 @@ def home():
     requested_id = request.args.get("id", "")
 
     if not logged_in:
-        if requested_view == "verify" and session.get("pending_register"):
-            auth_mode = "verify"
-        elif requested_view == "register":
+        if requested_view == "register":
             auth_mode = "register"
         else:
             auth_mode = "login"
@@ -1991,7 +1987,7 @@ def home():
 
     auth_mode = ""
 
-    if requested_view in ["login", "register", "verify", ""]:
+    if requested_view in ["login", "register", ""]:
         requested_view = "dashboard"
 
     allowed_views = {
@@ -2006,6 +2002,10 @@ def home():
         store = load_store()
         db = store["db"]
         user = db["users"].get(current_user_id())
+        if not user:
+            uid, user = find_user_by_email(db, current_email())
+            if uid and user:
+                session["user_id"] = uid
     except Exception as e:
         flash(f"Discord database error: {e}", "error")
         db = blank_db()
@@ -2017,10 +2017,6 @@ def home():
         flash("Account not found. Please login again.", "error")
         return redirect(url_for("home", view="login"))
 
-    if user.get("email_verified") is not True:
-        session.clear()
-        flash("This account is old or unverified. Please register again with a real email.", "error")
-        return redirect(url_for("home", view="register"))
 
     state = build_client_state(db, store, user)
 
@@ -2050,7 +2046,7 @@ def home():
 @app.route("/register", methods=["POST"])
 def register():
     try:
-        store = load_store()
+        store = load_store(force=True)
         db = store["db"]
     except Exception as e:
         flash(f"Discord database error: {e}", "error")
@@ -2073,116 +2069,25 @@ def register():
         flash("Password must be at least 6 characters.", "error")
         return redirect(url_for("home", view="register"))
 
-    user_id = user_id_from_email(email)
-    changed = False
-
     for existing_id, existing_user in list(db["users"].items()):
         existing_email = normalize_email(existing_user.get("email", ""))
         existing_username = existing_user.get("username", "").strip().lower()
-        is_verified = existing_user.get("email_verified") is True
 
-        if not is_verified and (existing_email == email or existing_username == username.lower()):
-            db["users"].pop(existing_id, None)
-            changed = True
-            continue
-
-        if is_verified and existing_email == email:
+        if existing_email == email:
             flash("Account already exists. Please login instead.", "error")
             return redirect(url_for("home", view="login"))
 
-        if is_verified and existing_username == username.lower():
+        if existing_username == username.lower():
             flash("Username already exists. Choose another one.", "error")
             return redirect(url_for("home", view="register"))
 
-    if changed:
-        try:
-            save_db(db)
-        except Exception:
-            pass
+    user_id = user_id_from_email(email)
 
-    code = str(secrets.randbelow(900000) + 100000)
-
-    try:
-        send_verification_email(email, code)
-    except Exception as e:
-        flash(f"Could not send verification email: {e}", "error")
-        return redirect(url_for("home", view="register"))
-
-    session["pending_register"] = {
+    user = {
         "id": user_id,
         "username": username,
         "email": email,
         "password_hash": generate_password_hash(password),
-        "code_hash": code_hash(code),
-        "expires": int(time.time()) + EMAIL_CODE_EXPIRE_SECONDS,
-        "created": int(time.time()),
-    }
-
-    flash("Verification code sent. Check your email.", "success")
-    return redirect(url_for("home", view="verify"))
-
-
-@app.route("/verify-email", methods=["POST"])
-def verify_email():
-    pending = session.get("pending_register")
-
-    if not pending:
-        flash("No pending verification. Please register again.", "error")
-        return redirect(url_for("home", view="register"))
-
-    if int(time.time()) > int(pending.get("expires", 0)):
-        session.pop("pending_register", None)
-        flash("Verification code expired. Please register again.", "error")
-        return redirect(url_for("home", view="register"))
-
-    code = request.form.get("code", "").strip()
-
-    if code_hash(code) != pending.get("code_hash"):
-        flash("Wrong verification code.", "error")
-        return redirect(url_for("home", view="verify"))
-
-    email = normalize_email(pending.get("email", ""))
-    email_ok, email_reason = validate_email_basic(email)
-
-    if not email_ok:
-        session.pop("pending_register", None)
-        flash(email_reason, "error")
-        return redirect(url_for("home", view="register"))
-
-    try:
-        store = load_store(force=True)
-        db = store["db"]
-    except Exception as e:
-        flash(f"Discord database error: {e}", "error")
-        return redirect(url_for("home", view="verify"))
-
-    user_id = pending.get("id")
-
-    for existing_id, existing_user in list(db["users"].items()):
-        existing_email = normalize_email(existing_user.get("email", ""))
-        existing_username = existing_user.get("username", "").strip().lower()
-        is_verified = existing_user.get("email_verified") is True
-
-        if not is_verified and (existing_email == email or existing_id == user_id):
-            db["users"].pop(existing_id, None)
-
-        if is_verified and existing_email == email:
-            session.pop("pending_register", None)
-            flash("Account already exists. Please login instead.", "error")
-            return redirect(url_for("home", view="login"))
-
-        if is_verified and existing_username == pending.get("username", "").strip().lower():
-            session.pop("pending_register", None)
-            flash("Username already exists. Choose another one.", "error")
-            return redirect(url_for("home", view="register"))
-
-    user = {
-        "id": user_id,
-        "username": pending.get("username"),
-        "email": email,
-        "password_hash": pending.get("password_hash"),
-        "email_verified": True,
-        "email_verified_at": int(time.time()),
         "pfp_id": "",
         "pfp_updated": 0,
         "about": "",
@@ -2198,52 +2103,13 @@ def verify_email():
         save_db(db)
     except Exception as e:
         flash(f"Could not save account to Discord DB: {e}", "error")
-        return redirect(url_for("home", view="verify"))
+        return redirect(url_for("home", view="register"))
 
-    session.pop("pending_register", None)
     session["email"] = email
+    session["user_id"] = user_id
 
-    flash("Email verified. Account created successfully.", "success")
+    flash("Account created successfully.", "success")
     return go("dashboard")
-
-
-@app.route("/resend-code")
-def resend_code():
-    pending = session.get("pending_register")
-
-    if not pending:
-        flash("No pending verification.", "error")
-        return redirect(url_for("home", view="register"))
-
-    email = normalize_email(pending.get("email", ""))
-    email_ok, email_reason = validate_email_basic(email)
-
-    if not email_ok:
-        session.pop("pending_register", None)
-        flash(email_reason, "error")
-        return redirect(url_for("home", view="register"))
-
-    code = str(secrets.randbelow(900000) + 100000)
-
-    try:
-        send_verification_email(email, code)
-    except Exception as e:
-        flash(f"Could not resend code: {e}", "error")
-        return redirect(url_for("home", view="verify"))
-
-    pending["code_hash"] = code_hash(code)
-    pending["expires"] = int(time.time()) + EMAIL_CODE_EXPIRE_SECONDS
-    session["pending_register"] = pending
-
-    flash("New verification code sent.", "success")
-    return redirect(url_for("home", view="verify"))
-
-
-@app.route("/cancel-verification")
-def cancel_verification():
-    session.pop("pending_register", None)
-    flash("Verification cancelled.", "success")
-    return redirect(url_for("home", view="register"))
 
 
 @app.route("/login", methods=["POST"])
@@ -2256,27 +2122,23 @@ def login():
 
     email = normalize_email(request.form.get("email", ""))
     password = request.form.get("password", "")
-    user_id = user_id_from_email(email)
-    user = db["users"].get(user_id)
+
+    uid, user = find_user_by_email(db, email)
 
     if not user:
-        flash("Account not found. Please create an account first.", "error")
+        flash("Account not found. Check the email or create an account first.", "error")
         return redirect(url_for("home", view="login"))
 
-    if user.get("email_verified") is not True:
-        db["users"].pop(user_id, None)
-        try:
-            save_db(db)
-        except Exception:
-            pass
-        flash("Old unverified account removed. Please register again with a real email.", "error")
-        return redirect(url_for("home", view="register"))
-
-    if not check_password_hash(user.get("password_hash", ""), password):
+    if not password_matches(user.get("password_hash", ""), password):
         flash("Wrong password. Please try again.", "error")
         return redirect(url_for("home", view="login"))
 
-    session["email"] = email
+    if not user.get("id"):
+        user["id"] = uid
+
+    session["email"] = normalize_email(user.get("email", email))
+    session["user_id"] = uid
+
     flash("Logged in successfully.", "success")
     return go("dashboard")
 
@@ -2303,9 +2165,6 @@ def change_username():
         return go("account")
 
     for existing_user in db["users"].values():
-        if existing_user.get("email_verified") is not True:
-            continue
-
         same_username = existing_user.get("username", "").strip().lower() == new_username.lower()
         different_account = existing_user.get("id") != user.get("id")
 
@@ -2487,6 +2346,11 @@ def upload():
     if not safe:
         flash(f"Upload blocked: {reason}", "error")
         return go("files")
+
+    for existing_file in db["files"].values():
+        if existing_file.get("original_name", "").strip().lower() == original_name.strip().lower():
+            flash("A file with this name already exists. Rename it before uploading again.", "error")
+            return go("files")
 
     file_id = secrets.token_hex(12)
 
@@ -2759,7 +2623,7 @@ def send_dm(target_id):
     sender = db["users"].get(current_user_id())
     target = db["users"].get(target_id)
 
-    if not target or target.get("email_verified") is not True:
+    if not target:
         flash("User not found.", "error")
         return go("messages")
 
@@ -2800,8 +2664,8 @@ def live_state():
         db = store["db"]
         user = db["users"].get(current_user_id())
 
-        if not user or user.get("email_verified") is not True:
-            return jsonify({"ok": False, "error": "Account not verified"}), 401
+        if not user:
+            return jsonify({"ok": False, "error": "Account not found"}), 401
 
         state = build_client_state(db, store, user)
         state["ok"] = True
@@ -2841,15 +2705,13 @@ def discord_test():
 
         post_discord_text(f"SWTEST|website connected|{int(time.time())}")
 
-        verified_count = len([u for u in db["users"].values() if u.get("email_verified") is True])
-        unverified_count = len([u for u in db["users"].values() if u.get("email_verified") is not True])
+        account_count = len([u for u in db["users"].values() if isinstance(u, dict) and u.get("email")])
 
         return (
             "DISCORD DATABASE WORKS<br>"
             f"Messages scanned: {store['message_count']}<br>"
             f"Snapshot loaded: {store['snapshot_loaded']}<br>"
-            f"Verified users: {verified_count}<br>"
-            f"Old/unverified users: {unverified_count}<br>"
+            f"Accounts: {account_count}<br>"
             f"Topics: {len(db['topics'])}<br>"
             f"Comments: {len(db['comments'])}<br>"
             f"Files: {len(db['files'])}<br>"
