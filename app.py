@@ -221,7 +221,7 @@ def now_ms():
 
 def blank_db():
     return {
-        "version": 10,
+        "version": 11,
         "users": {},
         "topics": {},
         "comments": {},
@@ -243,13 +243,22 @@ def normalize_db(db):
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 10
+    clean["version"] = 11
 
     if "updated_at" not in clean:
         clean["updated_at"] = now_ms()
 
     if "created_at" not in clean:
         clean["created_at"] = now_ms()
+
+    # Remove old verification garbage from old database snapshots.
+    for user in clean["users"].values():
+        if isinstance(user, dict):
+            user.pop("email_verified", None)
+            user.pop("email_verified_at", None)
+            user.pop("verification_code", None)
+            user.pop("code_hash", None)
+            user.pop("pending_register", None)
 
     return clean
 
@@ -440,7 +449,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v10|{int(time.time())}",
+        content=f"SWDBSNAP|v11|{int(time.time())}",
         filename="smartweb-db.json",
         file_bytes=raw,
         content_type="application/json",
@@ -721,7 +730,7 @@ def scan_zip_file(file_bytes):
     except Exception:
         return False, "ZIP could not be scanned."
 
-    return True, "ZIP passed basic safety check."
+    return True, "ZIP accepted."
 
 
 def scan_uploaded_file(filename, file_bytes):
@@ -893,7 +902,11 @@ def public_file(file_data, db=None):
         "name": name,
         "size": size_text(file_data.get("size", 0)),
         "category": file_category(name),
-        "author": username_from_id(file_data.get("author_id", ""), db, file_data.get("author", "unknown")),
+        "author": username_from_id(
+            file_data.get("author_id", ""),
+            db,
+            file_data.get("author", "unknown"),
+        ),
         "author_id": file_data.get("author_id", ""),
         "created": int(file_data.get("created", 0)),
         "is_audio": ext in AUDIO_EXTENSIONS,
@@ -931,7 +944,11 @@ def public_topic(topic_data, db=None):
             {
                 "id": c.get("id", ""),
                 "body": c.get("body", ""),
-                "author": username_from_id(c.get("author_id", ""), db, c.get("author", "unknown")),
+                "author": username_from_id(
+                    c.get("author_id", ""),
+                    db,
+                    c.get("author", "unknown"),
+                ),
                 "author_id": c.get("author_id", ""),
                 "created": int(c.get("created", 0)),
             }
@@ -1110,6 +1127,7 @@ def remove_old_verification_flash():
         "email code",
         "verify email",
         "send verification",
+        "verified",
     ]
 
     for category, message in flashes:
@@ -2535,7 +2553,10 @@ def download(file_id):
         BytesIO(response.content),
         as_attachment=True,
         download_name=file_data.get("original_name", "download"),
-        mimetype=file_data.get("content_type", mime_for_name(file_data.get("original_name", "file"))),
+        mimetype=file_data.get(
+            "content_type",
+            mime_for_name(file_data.get("original_name", "file")),
+        ),
     )
 
 
@@ -2815,6 +2836,82 @@ def discord_test():
 
     except Exception as e:
         return f"DISCORD DATABASE ERROR: {e}"
+
+
+@app.route("/recover-users")
+def recover_users():
+    try:
+        store = load_store(force=True)
+        current_db = store["db"]
+
+        messages = fetch_discord_messages()
+        snapshots = []
+
+        for message in messages:
+            content = message.get("content", "") or ""
+            attachments = message.get("attachments", []) or []
+
+            if content.startswith("SWDBSNAP|") and attachments:
+                try:
+                    db_url = attachments[0].get("url", "")
+                    response = requests.get(db_url, timeout=45)
+                    response.raise_for_status()
+                    snapshot_db = normalize_db(response.json())
+                    snapshots.append(snapshot_db)
+                except Exception:
+                    pass
+
+        recovered = 0
+        overwritten = 0
+
+        for snap in reversed(snapshots):
+            for uid, user in snap.get("users", {}).items():
+                if not isinstance(user, dict):
+                    continue
+
+                email = normalize_email(user.get("email", ""))
+
+                if not email:
+                    continue
+
+                user.pop("email_verified", None)
+                user.pop("email_verified_at", None)
+                user.pop("verification_code", None)
+                user.pop("code_hash", None)
+                user.pop("pending_register", None)
+
+                real_uid = user_id_from_email(email)
+                user["id"] = real_uid
+                user["email"] = email
+
+                if real_uid not in current_db["users"]:
+                    current_db["users"][real_uid] = user
+                    recovered += 1
+                else:
+                    existing = current_db["users"][real_uid]
+
+                    # Keep newest password hash if it exists, but fill missing fields.
+                    for k, v in user.items():
+                        if k not in existing or existing.get(k) in ["", None]:
+                            existing[k] = v
+
+                    current_db["users"][real_uid] = existing
+                    overwritten += 1
+
+        save_db(current_db)
+        clear_cache()
+
+        return (
+            "RECOVERY DONE<br>"
+            f"Snapshots scanned: {len(snapshots)}<br>"
+            f"Users recovered: {recovered}<br>"
+            f"Existing users checked: {overwritten}<br>"
+            f"Total users now: {len(current_db['users'])}<br>"
+            "<br>Now go back and login."
+        )
+
+    except Exception as e:
+        return f"RECOVERY ERROR: {e}"
 
 
 @app.errorhandler(413)
