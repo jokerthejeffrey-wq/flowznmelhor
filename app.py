@@ -474,14 +474,15 @@ HTML = """
 :root{
     --white:#ffffff;
     --text:#f7fbff;
-    --muted:rgba(255,255,255,.72);
-    --soft:rgba(255,255,255,.54);
-    --blue:#9fe7ff;
+    --muted:rgba(245,250,255,.75);
+    --soft:rgba(255,255,255,.58);
+    --blue:#a7ecff;
+    --blue2:#63d3ff;
     --dark:#06101d;
-    --panel:rgba(3,13,24,.76);
-    --panel2:rgba(0,0,0,.34);
-    --line:rgba(255,255,255,.26);
-    --line2:rgba(255,255,255,.14);
+    --glass:rgba(9,20,31,.38);
+    --glass2:rgba(255,255,255,.075);
+    --line:rgba(255,255,255,.24);
+    --line2:rgba(255,255,255,.13);
     --red:#ff5468;
 }
 
@@ -491,23 +492,43 @@ body{
     color:var(--text);
     font-family:Arial,Helvetica,sans-serif;
     background:
-        linear-gradient(rgba(2,8,16,.70), rgba(2,8,16,.86)),
-        radial-gradient(circle at 18% 18%, rgba(125,215,255,.26), transparent 28%),
-        radial-gradient(circle at 84% 78%, rgba(43,110,190,.24), transparent 35%);
+        radial-gradient(circle at 18% 14%, rgba(121,219,255,.23), transparent 28%),
+        radial-gradient(circle at 82% 82%, rgba(56,92,190,.23), transparent 35%),
+        linear-gradient(135deg, #030910 0%, #08131d 42%, #040810 100%);
     background-size:cover;
     background-position:center;
     overflow:hidden;
 }
 
 body::before{
-    content:"";
+    content:"FLOWZNMELHOR   PRODUCER ROOM   DISCORD DATABASE   PRIVATE FILES   DIRECT MESSAGES   ";
     position:fixed;
     inset:0;
+    white-space:pre-wrap;
+    word-spacing:26px;
+    letter-spacing:10px;
+    line-height:82px;
+    font-size:12px;
+    font-weight:900;
+    color:rgba(255,255,255,.045);
     background-image:
-        linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
     background-size:24px 24px;
-    opacity:.65;
+    pointer-events:none;
+    z-index:0;
+}
+
+body::after{
+    content:"";
+    position:fixed;
+    width:520px;
+    height:520px;
+    right:-180px;
+    top:-200px;
+    background:rgba(167,236,255,.16);
+    filter:blur(55px);
+    border-radius:50%;
     pointer-events:none;
     z-index:0;
 }
@@ -533,12 +554,14 @@ body::before{
 
 .login-shell{
     width:390px;
-    background:rgba(3,13,24,.78);
-    border:1px solid rgba(255,255,255,.28);
-    backdrop-filter:blur(18px);
-    -webkit-backdrop-filter:blur(18px);
-    box-shadow:0 28px 80px rgba(0,0,0,.50);
-    border-radius:6px;
+    background:rgba(7,18,29,.42);
+    border:1px solid rgba(255,255,255,.25);
+    backdrop-filter:blur(22px) saturate(150%);
+    -webkit-backdrop-filter:blur(22px) saturate(150%);
+    box-shadow:
+        0 30px 90px rgba(0,0,0,.55),
+        inset 0 1px 0 rgba(255,255,255,.16);
+    border-radius:10px;
     padding:32px;
 }
 
@@ -548,6 +571,7 @@ body::before{
     font-weight:900;
     color:white;
     margin-bottom:28px;
+    text-shadow:0 2px 14px rgba(0,0,0,.55);
 }
 
 .login-logo::after{
@@ -557,6 +581,7 @@ body::before{
     height:2px;
     background:var(--blue);
     margin-top:12px;
+    box-shadow:0 0 18px rgba(167,236,255,.7);
 }
 
 .login-title{
@@ -565,13 +590,15 @@ body::before{
     color:white;
     margin-bottom:8px;
     letter-spacing:-1px;
+    text-shadow:0 2px 18px rgba(0,0,0,.65);
 }
 
 .login-sub{
-    color:rgba(255,255,255,.76);
+    color:rgba(255,255,255,.78);
     font-size:14px;
     line-height:1.6;
     margin-bottom:26px;
+    text-shadow:0 1px 10px rgba(0,0,0,.65);
 }
 
 .login-input-wrap{
@@ -581,17 +608,18 @@ body::before{
 
 .login-input-wrap input{
     width:100%;
-    background:rgba(0,0,0,.28);
-    border:1px solid rgba(255,255,255,.24);
+    background:rgba(255,255,255,.055);
+    border:1px solid rgba(255,255,255,.22);
     color:white;
     outline:none;
     padding:13px 14px;
     font-size:14px;
     font-weight:700;
+    backdrop-filter:blur(16px);
 }
 
 .login-input-wrap input::placeholder{
-    color:rgba(255,255,255,.60);
+    color:rgba(255,255,255,.62);
     font-weight:500;
 }
 
@@ -601,7 +629,7 @@ body::before{
     justify-content:center;
     width:100%;
     height:44px;
-    border-radius:4px;
+    border-radius:5px;
     border:1px solid rgba(255,255,255,.28);
     cursor:pointer;
     transition:.18s ease;
@@ -611,30 +639,32 @@ body::before{
 }
 
 .btn-dark{
-    background:#071827;
+    background:rgba(7,24,39,.62);
     color:white;
+    backdrop-filter:blur(14px);
 }
 
 .btn-dark:hover{
-    background:#102b43;
+    background:rgba(16,43,67,.72);
     border-color:var(--blue);
     transform:translateY(-1px);
+    box-shadow:0 0 22px rgba(167,236,255,.14);
 }
 
 .btn-white{
-    background:white;
+    background:rgba(255,255,255,.92);
     color:#06101d;
     border-color:white;
 }
 
 .btn-white:hover{
-    background:#e9f8ff;
+    background:white;
     transform:translateY(-1px);
 }
 
 .login-line{
     height:1px;
-    background:rgba(255,255,255,.20);
+    background:rgba(255,255,255,.18);
     margin:18px 0 14px;
 }
 
@@ -656,17 +686,18 @@ body::before{
     margin-bottom:18px;
     font-size:14px;
     border-radius:4px;
+    backdrop-filter:blur(18px);
 }
 
 .alert-box{
-    background:rgba(80,0,0,.55);
+    background:rgba(80,0,0,.45);
     color:#ffdede;
     border:1px solid rgba(255,90,90,.46);
     border-left:3px solid #ff5757;
 }
 
 .success-box{
-    background:rgba(0,70,30,.48);
+    background:rgba(0,70,30,.38);
     color:#d6ffe1;
     border:1px solid rgba(67,232,139,.44);
     border-left:3px solid #43e88b;
@@ -676,13 +707,15 @@ body::before{
     width:260px;
     padding:28px 20px;
     border:1px solid var(--line);
-    background:var(--panel);
-    backdrop-filter:blur(18px);
-    -webkit-backdrop-filter:blur(18px);
-    box-shadow:0 22px 60px rgba(0,0,0,.45);
+    background:rgba(7,18,29,.43);
+    backdrop-filter:blur(24px) saturate(155%);
+    -webkit-backdrop-filter:blur(24px) saturate(155%);
+    box-shadow:
+        0 22px 60px rgba(0,0,0,.45),
+        inset 0 1px 0 rgba(255,255,255,.14);
     display:flex;
     flex-direction:column;
-    border-radius:6px;
+    border-radius:10px;
 }
 
 .title{
@@ -691,6 +724,7 @@ body::before{
     color:white;
     margin-bottom:30px;
     font-weight:900;
+    text-shadow:0 2px 12px rgba(0,0,0,.65);
 }
 
 .title::after{
@@ -700,25 +734,27 @@ body::before{
     height:2px;
     background:var(--blue);
     margin-top:12px;
+    box-shadow:0 0 18px rgba(167,236,255,.7);
 }
 
 .user-mini{
-    background:rgba(255,255,255,.08);
-    border:1px solid rgba(255,255,255,.14);
-    border-radius:4px;
+    background:rgba(255,255,255,.075);
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:8px;
     padding:12px;
     margin-bottom:24px;
     display:flex;
     gap:12px;
     align-items:center;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
 }
 
 .pfp-box{
     width:46px;
     height:46px;
-    border-radius:4px;
+    border-radius:6px;
     background:rgba(255,255,255,.08);
-    border:1px solid rgba(255,255,255,.20);
+    border:1px solid rgba(255,255,255,.22);
     display:flex;
     align-items:center;
     justify-content:center;
@@ -727,6 +763,7 @@ body::before{
     color:white;
     font-weight:900;
     font-size:18px;
+    text-shadow:0 2px 10px rgba(0,0,0,.5);
 }
 
 .pfp-box img{
@@ -740,6 +777,7 @@ body::before{
     color:white;
     font-weight:900;
     font-size:14px;
+    text-shadow:0 2px 12px rgba(0,0,0,.6);
 }
 
 .user-mini-mail{
@@ -763,20 +801,22 @@ body::before{
     user-select:none;
     transition:.18s ease;
     line-height:2.35;
-    color:rgba(255,255,255,.76);
+    color:rgba(255,255,255,.75);
     padding:2px 10px;
     margin-bottom:4px;
-    border-radius:4px;
+    border-radius:5px;
     font-size:14px;
     letter-spacing:.4px;
     text-transform:uppercase;
     font-weight:900;
+    text-shadow:0 2px 12px rgba(0,0,0,.55);
 }
 
 .item:hover,.item.active{
     color:white;
     background:rgba(255,255,255,.13);
     transform:translateX(4px);
+    box-shadow:inset 2px 0 0 var(--blue);
 }
 
 .clicked{
@@ -795,11 +835,13 @@ body::before{
     overflow-y:auto;
     transition:opacity .25s ease,transform .25s ease;
     border:1px solid var(--line);
-    background:var(--panel);
-    backdrop-filter:blur(20px);
-    -webkit-backdrop-filter:blur(20px);
-    box-shadow:0 22px 65px rgba(0,0,0,.42);
-    border-radius:6px;
+    background:rgba(7,18,29,.36);
+    backdrop-filter:blur(24px) saturate(160%);
+    -webkit-backdrop-filter:blur(24px) saturate(160%);
+    box-shadow:
+        0 22px 65px rgba(0,0,0,.42),
+        inset 0 1px 0 rgba(255,255,255,.13);
+    border-radius:10px;
 }
 
 .content.fade{
@@ -809,7 +851,7 @@ body::before{
 
 .content::-webkit-scrollbar{width:10px}
 .content::-webkit-scrollbar-track{background:rgba(255,255,255,.04)}
-.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.28);border-radius:4px}
+.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.26);border-radius:4px}
 
 .page-title{
     font-size:34px;
@@ -817,6 +859,7 @@ body::before{
     margin-bottom:10px;
     color:white;
     letter-spacing:-1px;
+    text-shadow:0 2px 18px rgba(0,0,0,.75);
 }
 
 .page-sub{
@@ -824,6 +867,7 @@ body::before{
     font-size:14px;
     line-height:1.7;
     margin-bottom:28px;
+    text-shadow:0 1px 10px rgba(0,0,0,.65);
 }
 
 .grid{
@@ -834,16 +878,19 @@ body::before{
 }
 
 .card{
-    background:rgba(0,0,0,.34);
-    border:1px solid rgba(255,255,255,.20);
-    border-radius:5px;
+    background:rgba(255,255,255,.07);
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:8px;
     padding:18px;
     transition:.18s ease;
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
 }
 
 .card:hover{
-    background:rgba(0,0,0,.46);
-    border-color:rgba(157,228,255,.58);
+    background:rgba(255,255,255,.105);
+    border-color:rgba(167,236,255,.55);
     transform:translateY(-1px);
 }
 
@@ -859,6 +906,7 @@ body::before{
     color:white;
     font-size:30px;
     font-weight:900;
+    text-shadow:0 2px 14px rgba(0,0,0,.7);
 }
 
 .card-text{
@@ -869,29 +917,29 @@ body::before{
 }
 
 .line{
-    border-left:1px solid rgba(255,255,255,.34);
+    border-left:1px solid rgba(255,255,255,.28);
     padding-left:24px;
     max-width:980px;
 }
 
 input,textarea{
-    background:rgba(0,0,0,.36);
+    background:rgba(255,255,255,.055);
     color:white;
-    border:1px solid rgba(255,255,255,.34);
+    border:1px solid rgba(255,255,255,.22);
     padding:13px 14px;
     outline:none;
-    border-radius:4px;
+    border-radius:6px;
     font-size:14px;
-    backdrop-filter:blur(10px);
+    backdrop-filter:blur(16px);
 }
 
 input::placeholder,textarea::placeholder{
-    color:rgba(255,255,255,.62);
+    color:rgba(255,255,255,.58);
 }
 
 input:focus,textarea:focus{
     border-color:var(--blue);
-    background:rgba(0,0,0,.48);
+    background:rgba(255,255,255,.075);
 }
 
 textarea{
@@ -909,15 +957,18 @@ textarea{
 .file-row,.topic-row,.credit-row,.comment-row,.user-row,.dm-row{
     margin-bottom:16px;
     padding:16px 18px;
-    background:rgba(0,0,0,.34);
-    border:1px solid rgba(255,255,255,.22);
-    border-radius:5px;
+    background:rgba(255,255,255,.065);
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:8px;
     transition:.18s ease;
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
 }
 
 .file-row:hover,.topic-row:hover,.credit-row:hover,.comment-row:hover,.user-row:hover,.dm-row:hover{
-    background:rgba(0,0,0,.46);
-    border-color:rgba(157,228,255,.58);
+    background:rgba(255,255,255,.105);
+    border-color:rgba(167,236,255,.55);
     transform:translateY(-1px);
 }
 
@@ -926,12 +977,14 @@ textarea{
     color:white;
     margin-bottom:7px;
     font-weight:900;
+    text-shadow:0 2px 12px rgba(0,0,0,.6);
 }
 
 .meta,.topic-meta,.comment-meta,.small{
     color:var(--muted);
     font-size:14px;
     line-height:1.7;
+    text-shadow:0 1px 9px rgba(0,0,0,.55);
 }
 
 .body-text{
@@ -946,6 +999,7 @@ textarea{
     transition:.18s ease;
     cursor:pointer;
     font-weight:900;
+    text-shadow:0 1px 10px rgba(0,0,0,.7);
 }
 
 .file-link:hover,.topic-open:hover,.fake-link:hover,.name-link:hover{
@@ -955,7 +1009,7 @@ textarea{
 
 .form-box{
     margin-top:32px;
-    border-left:1px solid rgba(255,255,255,.34);
+    border-left:1px solid rgba(255,255,255,.28);
     padding-left:24px;
     max-width:740px;
 }
@@ -965,38 +1019,42 @@ button,.file-button{
     align-items:center;
     justify-content:center;
     gap:10px;
-    background:#071827;
+    background:rgba(7,24,39,.58);
     color:white;
-    border:1px solid rgba(255,255,255,.28);
+    border:1px solid rgba(255,255,255,.24);
     padding:12px 18px;
-    border-radius:4px;
+    border-radius:6px;
     cursor:pointer;
     transition:.18s ease;
     font-size:14px;
     text-decoration:none;
     font-weight:900;
-    backdrop-filter:blur(10px);
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+    text-shadow:0 2px 10px rgba(0,0,0,.55);
 }
 
 button:hover,.file-button:hover{
-    background:#102b43;
+    background:rgba(16,43,67,.72);
     border-color:var(--blue);
     transform:translateY(-1px);
+    box-shadow:0 0 22px rgba(167,236,255,.13);
 }
 
 .primary-btn{
-    background:white;
+    background:rgba(255,255,255,.92);
     color:#06101d;
     border-color:white;
+    text-shadow:none;
 }
 
 .primary-btn:hover{
-    background:#e9f8ff;
+    background:white;
     color:#000;
 }
 
 .danger-btn{
-    background:rgba(80,0,0,.45);
+    background:rgba(80,0,0,.42);
     border-color:rgba(255,90,90,.50);
     color:#ffdede;
 }
@@ -1008,11 +1066,15 @@ button:hover,.file-button:hover{
 
 .account-box{
     width:430px;
-    background:rgba(0,0,0,.38);
-    border:1px solid rgba(255,255,255,.28);
-    border-radius:5px;
+    background:rgba(255,255,255,.065);
+    border:1px solid rgba(255,255,255,.18);
+    border-radius:8px;
     padding:28px;
-    box-shadow:0 20px 55px rgba(0,0,0,.35);
+    box-shadow:
+        0 20px 55px rgba(0,0,0,.35),
+        inset 0 1px 0 rgba(255,255,255,.09);
+    backdrop-filter:blur(20px);
+    -webkit-backdrop-filter:blur(20px);
 }
 
 .login-card-title{
@@ -1021,6 +1083,7 @@ button:hover,.file-button:hover{
     margin-bottom:8px;
     font-weight:900;
     letter-spacing:-.5px;
+    text-shadow:0 2px 14px rgba(0,0,0,.65);
 }
 
 .login-card-sub{
@@ -1048,13 +1111,13 @@ button:hover,.file-button:hover{
 }
 
 .comment-row{
-    border-left:1px solid rgba(157,228,255,.42);
+    border-left:1px solid rgba(167,236,255,.36);
 }
 
 .account-section{
     margin-top:28px;
     padding-top:22px;
-    border-top:1px solid rgba(255,255,255,.22);
+    border-top:1px solid rgba(255,255,255,.18);
 }
 
 .account-pfp,.profile-head{
@@ -1081,46 +1144,30 @@ button:hover,.file-button:hover{
 .credit-heading:first-child{margin-top:0}
 
 .credit-divider{
-    border-top:1px solid rgba(255,255,255,.28);
+    border-top:1px solid rgba(255,255,255,.22);
     width:280px;
     margin:24px 0;
-}
-
-.pill-row{
-    display:flex;
-    flex-wrap:wrap;
-    gap:10px;
-    margin-bottom:28px;
-}
-
-.pill{
-    color:white;
-    background:rgba(255,255,255,.09);
-    border:1px solid rgba(255,255,255,.18);
-    padding:9px 12px;
-    border-radius:4px;
-    font-size:13px;
-    font-weight:800;
 }
 
 .dm-message{
     max-width:70%;
     margin-bottom:12px;
     padding:12px 14px;
-    border-radius:5px;
-    border:1px solid rgba(255,255,255,.18);
-    background:rgba(255,255,255,.08);
+    border-radius:8px;
+    border:1px solid rgba(255,255,255,.16);
+    background:rgba(255,255,255,.075);
+    backdrop-filter:blur(16px);
 }
 
 .dm-message.me{
     margin-left:auto;
-    background:rgba(159,231,255,.14);
-    border-color:rgba(159,231,255,.32);
+    background:rgba(167,236,255,.14);
+    border-color:rgba(167,236,255,.32);
 }
 
 .dm-message.them{
     margin-right:auto;
-    background:rgba(0,0,0,.34);
+    background:rgba(255,255,255,.06);
 }
 
 @media(max-width:900px){
@@ -1396,14 +1443,6 @@ function showDashboard(button){
             </div>
         </div>
 
-        <div class="pill-row">
-            <div class="pill">MTG ideas</div>
-            <div class="pill">FL Studio packs</div>
-            <div class="pill">Beat feedback</div>
-            <div class="pill">Producer chat</div>
-            <div class="pill">Brazil funk</div>
-        </div>
-
         <div class="line">
             <div class="topic-title">recent activity</div>
             <br>
@@ -1437,8 +1476,8 @@ function showDashboard(button){
         </div>
 
         <div class="form-box">
-            <div class="topic-title">make it feel alive</div>
-            <p class="small">Cards, activity, profiles, direct messages, profile pictures and discussions make the site feel active.</p>
+            <div class="topic-title">quick actions</div>
+            <p class="small">Upload a pack, start a discussion, open profiles, or send direct messages.</p>
             <button onclick="showFiles(document.getElementById('menuFiles'))">upload file</button>
             <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">start discussion</button>
         </div>
@@ -1682,14 +1721,10 @@ function openProfile(userId){
     setUrl("profile", userId);
     clearActive();
 
-    let actionButtons = `
-        <button onclick="openDm('${u.id}')">direct message</button>
-    `;
+    let actionButtons = `<button onclick="openDm('${u.id}')">direct message</button>`;
 
     if(u.id === currentUserId){
-        actionButtons = `
-            <button onclick="showAccount(document.getElementById('menuAccount'))">edit account</button>
-        `;
+        actionButtons = `<button onclick="showAccount(document.getElementById('menuAccount'))">edit account</button>`;
     }
 
     let html=`
