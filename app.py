@@ -1,17 +1,15 @@
 import os
-import re
 import json
 import time
 import hashlib
 import secrets
 import zipfile
-import smtplib
+import re
+import dns.resolver
 from io import BytesIO
 from functools import wraps
-from email.message import EmailMessage
 
 import requests
-import dns.resolver
 from flask import (
     Flask,
     render_template_string,
@@ -35,29 +33,16 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 DISCORD_DB_CHANNEL_ID = os.environ.get("DISCORD_DB_CHANNEL_ID", "").strip()
 DISCORD_API = "https://discord.com/api/v10"
 
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com").strip()
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-MAIL_USERNAME = os.environ.get("MAIL_USERNAME", "").strip()
-MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD", "").strip()
-MAIL_FROM = os.environ.get("MAIL_FROM", MAIL_USERNAME).strip()
-
 MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", str(8 * 1024 * 1024)))
 MAX_DB_SIZE = int(os.environ.get("MAX_DB_SIZE", str(7 * 1024 * 1024)))
 
 POST_COOLDOWN_SECONDS = int(os.environ.get("POST_COOLDOWN_SECONDS", "30"))
 COMMENT_COOLDOWN_SECONDS = int(os.environ.get("COMMENT_COOLDOWN_SECONDS", "8"))
-EMAIL_CODE_EXPIRE_SECONDS = 10 * 60
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
 ALLOWED_EXTENSIONS = {".zip", ".mp3"}
 ALLOWED_PFP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-
-DANGEROUS_ZIP_EXTENSIONS = {
-    ".exe", ".bat", ".cmd", ".scr", ".ps1", ".vbs", ".js", ".jar",
-    ".msi", ".dll", ".com", ".pif", ".lnk", ".reg", ".hta", ".apk",
-    ".sh", ".command", ".app"
-}
 
 EMAIL_REGEX = re.compile(
     r"^(?=.{6,254}$)(?=.{1,64}@)[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
@@ -65,21 +50,39 @@ EMAIL_REGEX = re.compile(
 )
 
 BLOCKED_EMAIL_DOMAINS = {
-    "example.com", "example.org", "example.net", "test.com", "fake.com",
-    "mailinator.com", "10minutemail.com", "10minutemail.net", "10minutemail.org",
-    "guerrillamail.com", "guerrillamail.net", "guerrillamail.org",
-    "temp-mail.org", "tempmail.com", "tempmail.net", "tempmailo.com",
-    "throwawaymail.com", "yopmail.com", "sharklasers.com", "getnada.com",
-    "trashmail.com", "dispostable.com", "maildrop.cc", "moakt.com",
-    "emailondeck.com", "mintemail.com", "mytemp.email", "tempail.com",
-    "fakeinbox.com", "spamgourmet.com", "burnermail.io", "mail.tm",
-    "inboxkitten.com", "tempmail.plus", "tmail.io", "fakemail.net",
-    "fakemailgenerator.com", "dropmail.me", "33mail.com", "mvrht.com",
-    "mailnesia.com", "mailcatch.com", "mailforspam.com", "spambog.com",
-    "trash-mail.com", "tempm.com", "temporary-mail.net", "tempmailaddress.com",
-    "mohmal.com", "emailfake.com", "fexpost.com", "fexbox.org", "fextemp.com",
-    "tmpmail.org", "tmpmail.net", "minuteinbox.com", "emailtemporanea.com",
-    "tempinbox.com", "instant-email.org", "spam4.me", "inboxbear.com"
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "fake.com",
+    "mailinator.com",
+    "10minutemail.com",
+    "guerrillamail.com",
+    "guerrillamail.net",
+    "temp-mail.org",
+    "tempmail.com",
+    "throwawaymail.com",
+    "yopmail.com",
+    "sharklasers.com",
+    "getnada.com",
+    "trashmail.com",
+    "dispostable.com",
+    "maildrop.cc",
+    "moakt.com",
+    "emailondeck.com",
+    "mintemail.com",
+    "mytemp.email",
+    "tempmailo.com",
+    "tempmail.net",
+    "tempail.com",
+    "fakeinbox.com",
+    "spamgourmet.com"
+}
+
+DANGEROUS_ZIP_EXTENSIONS = {
+    ".exe", ".bat", ".cmd", ".scr", ".ps1", ".vbs", ".js", ".jar",
+    ".msi", ".dll", ".com", ".pif", ".lnk", ".reg", ".hta", ".apk",
+    ".sh", ".command", ".app"
 }
 
 CACHE_SECONDS = 2
@@ -107,7 +110,7 @@ def now_ms():
 
 def blank_db():
     return {
-        "version": 7,
+        "version": 6,
         "users": {},
         "topics": {},
         "comments": {},
@@ -129,7 +132,7 @@ def normalize_db(db):
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 7
+    clean["version"] = 6
 
     if "updated_at" not in clean:
         clean["updated_at"] = now_ms()
@@ -152,6 +155,7 @@ def discord_request(method, endpoint, **kwargs):
     require_discord_config()
 
     url = endpoint if endpoint.startswith("http") else f"{DISCORD_API}{endpoint}"
+
     headers = kwargs.pop("headers", {})
     headers["Authorization"] = f"Bot {DISCORD_BOT_TOKEN}"
 
@@ -230,7 +234,10 @@ def post_discord_text(content):
 
 def post_discord_attachment(content, filename, file_bytes, content_type):
     payload = {"content": content}
-    data = {"payload_json": json.dumps(payload)}
+
+    data = {
+        "payload_json": json.dumps(payload)
+    }
 
     files = {
         "files[0]": (
@@ -323,7 +330,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v7|{int(time.time())}",
+        content=f"SWDBSNAP|v6|{int(time.time())}",
         filename="smartweb-db.json",
         file_bytes=raw,
         content_type="application/json"
@@ -346,127 +353,6 @@ def save_profile_picture_to_discord(pfp_id, filename, file_bytes, content_type):
         file_bytes=file_bytes,
         content_type=content_type or "application/octet-stream"
     )
-
-
-def normalize_email(email):
-    return (email or "").strip().lower()
-
-
-def email_domain_is_blocked(domain):
-    domain = domain.lower().strip()
-
-    for blocked in BLOCKED_EMAIL_DOMAINS:
-        if domain == blocked or domain.endswith("." + blocked):
-            return True
-
-    return False
-
-
-def email_domain_format_ok(domain):
-    if not domain or "." not in domain:
-        return False
-
-    if len(domain) > 253:
-        return False
-
-    labels = domain.split(".")
-
-    for label in labels:
-        if not label:
-            return False
-
-        if len(label) > 63:
-            return False
-
-        if label.startswith("-") or label.endswith("-"):
-            return False
-
-        if not re.fullmatch(r"[a-z0-9-]+", label):
-            return False
-
-    tld = labels[-1]
-
-    if len(tld) < 2 or len(tld) > 24:
-        return False
-
-    if not re.fullmatch(r"[a-z]+", tld):
-        return False
-
-    return True
-
-
-def email_domain_has_mx(domain):
-    try:
-        resolver = dns.resolver.Resolver()
-        resolver.timeout = 3
-        resolver.lifetime = 3
-
-        answers = resolver.resolve(domain, "MX")
-        return len(answers) > 0
-
-    except Exception:
-        return False
-
-
-def validate_real_email(email):
-    email = normalize_email(email)
-
-    if not EMAIL_REGEX.fullmatch(email):
-        return False, "Invalid email format."
-
-    local, domain = email.rsplit("@", 1)
-
-    if ".." in local:
-        return False, "Invalid email format."
-
-    if local.startswith(".") or local.endswith("."):
-        return False, "Invalid email format."
-
-    if email_domain_is_blocked(domain):
-        return False, "Temporary or fake email domains are not allowed."
-
-    if not email_domain_format_ok(domain):
-        return False, "Invalid email domain."
-
-    if not email_domain_has_mx(domain):
-        return False, "This email domain cannot receive mail."
-
-    return True, "Email accepted."
-
-
-def require_mail_config():
-    if not MAIL_USERNAME:
-        raise RuntimeError("Missing MAIL_USERNAME in Render Environment.")
-
-    if not MAIL_PASSWORD:
-        raise RuntimeError("Missing MAIL_PASSWORD in Render Environment.")
-
-    if not MAIL_FROM:
-        raise RuntimeError("Missing MAIL_FROM in Render Environment.")
-
-
-def send_verification_email(to_email, code):
-    require_mail_config()
-
-    msg = EmailMessage()
-    msg["Subject"] = "Your FlowZNmelhor verification code"
-    msg["From"] = MAIL_FROM
-    msg["To"] = to_email
-
-    msg.set_content(
-        f"Your verification code is: {code}\n\n"
-        "This code expires in 10 minutes.\n\n"
-        "If this was not you, ignore this email."
-    )
-
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=25) as server:
-        server.starttls()
-        server.login(MAIL_USERNAME, MAIL_PASSWORD)
-        server.send_message(msg)
-
-
-def code_hash(code):
-    return hashlib.sha256(str(code).encode("utf-8")).hexdigest()
 
 
 def user_id_from_email(email):
@@ -679,11 +565,6 @@ def login_required(func):
             flash("Account not found. Please login again.", "error")
             return redirect(url_for("home", view="login"))
 
-        if user.get("email_verified") is not True:
-            session.clear()
-            flash("This account is old or unverified. Please register again with a real email.", "error")
-            return redirect(url_for("home", view="register"))
-
         return func(*args, **kwargs)
 
     return wrapper
@@ -871,23 +752,15 @@ def public_notifications(db, current_id):
 def build_client_state(db, store, user):
     current_id = user.get("id", "")
 
-    verified_users = {
-        uid: data for uid, data in db["users"].items()
-        if data.get("email_verified") is True
-    }
-
-    visible_db = dict(db)
-    visible_db["users"] = verified_users
-
-    files = [public_file(file_data, visible_db) for file_data in db["files"].values()]
+    files = [public_file(file_data, db) for file_data in db["files"].values()]
     files.sort(key=lambda x: x["created"], reverse=True)
 
-    topics = [public_topic(topic_data, visible_db) for topic_data in db["topics"].values()]
+    topics = [public_topic(topic_data, db) for topic_data in db["topics"].values()]
     topics.sort(key=lambda x: x["created"], reverse=True)
 
     public_users = [
-        public_user(user_data, visible_db, store, current_id)
-        for user_data in verified_users.values()
+        public_user(user_data, db, store, current_id)
+        for user_data in db["users"].values()
     ]
     public_users.sort(key=lambda x: x["username"].lower())
 
@@ -921,15 +794,18 @@ HTML = """
 }
 
 :root{
-    --bg:#060b10;
-    --bg2:#09131b;
-    --text:#f5f7fa;
-    --muted:rgba(245,247,250,.62);
-    --line:rgba(255,255,255,.16);
-    --line2:rgba(255,255,255,.08);
-    --blue:#9fe7ff;
-    --danger:#ff5c6c;
-    --good:#55e68a;
+    --white:#ffffff;
+    --text:#f7fbff;
+    --muted:rgba(245,250,255,.72);
+    --soft:rgba(255,255,255,.52);
+    --blue:#a7ecff;
+    --blue2:#63d3ff;
+    --dark:#06101d;
+    --glass:rgba(9,20,31,.32);
+    --glass2:rgba(255,255,255,.055);
+    --line:rgba(255,255,255,.20);
+    --line2:rgba(255,255,255,.10);
+    --red:#ff5468;
 }
 
 html,body{
@@ -941,94 +817,269 @@ body{
     color:var(--text);
     font-family:Arial,Helvetica,sans-serif;
     background:
-        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
-        linear-gradient(135deg, var(--bg), var(--bg2));
-    background-size:24px 24px,24px 24px,100% 100%;
+        radial-gradient(circle at 15% 10%, rgba(121,219,255,.18), transparent 28%),
+        radial-gradient(circle at 82% 82%, rgba(56,92,190,.18), transparent 35%),
+        linear-gradient(135deg, #030910 0%, #08131d 42%, #040810 100%);
     overflow:hidden;
 }
 
+body::before{
+    content:"FLOWZNMELHOR   PRODUCER ROOM   DISCORD DATABASE   PRIVATE FILES   DIRECT MESSAGES   LIVE UPDATES   ";
+    position:fixed;
+    inset:0;
+    white-space:pre-wrap;
+    word-spacing:26px;
+    letter-spacing:10px;
+    line-height:82px;
+    font-size:12px;
+    font-weight:900;
+    color:rgba(255,255,255,.035);
+    background-image:
+        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+    background-size:24px 24px;
+    pointer-events:none;
+    z-index:0;
+}
+
+body::after{
+    content:"";
+    position:fixed;
+    width:520px;
+    height:520px;
+    right:-180px;
+    top:-200px;
+    background:rgba(167,236,255,.12);
+    filter:blur(55px);
+    pointer-events:none;
+    z-index:0;
+}
+
 .app{
+    position:relative;
+    z-index:1;
     height:100vh;
     display:flex;
+    padding:16px;
+    gap:16px;
 }
 
-.side{
-    width:260px;
-    padding:30px 24px;
-    border-right:1px solid var(--line);
-    background:rgba(0,0,0,.10);
+.login-only{
+    height:100vh;
     display:flex;
-    flex-direction:column;
+    justify-content:center;
+    align-items:center;
+    padding:20px;
+    position:relative;
+    z-index:2;
 }
 
-.content{
-    flex:1;
-    padding:48px 58px;
-    overflow-y:auto;
-    background:transparent;
-    border:none;
-    transition:opacity .12s ease;
+.login-shell{
+    width:390px;
+    background:rgba(7,18,29,.38);
+    border:1px solid rgba(255,255,255,.22);
+    backdrop-filter:blur(22px) saturate(150%);
+    -webkit-backdrop-filter:blur(22px) saturate(150%);
+    box-shadow:
+        0 30px 90px rgba(0,0,0,.48),
+        inset 0 1px 0 rgba(255,255,255,.12);
+    padding:32px;
 }
 
-.content.fade{
-    opacity:.45;
-}
-
-.content::-webkit-scrollbar{
-    width:8px;
-}
-
-.content::-webkit-scrollbar-track{
-    background:transparent;
-}
-
-.content::-webkit-scrollbar-thumb{
-    background:rgba(255,255,255,.18);
-}
-
-.title,
 .login-logo{
     font-size:12px;
-    letter-spacing:4px;
-    color:white;
-    margin-bottom:34px;
+    letter-spacing:3px;
     font-weight:900;
+    color:white;
+    margin-bottom:28px;
+    text-shadow:0 2px 14px rgba(0,0,0,.55);
 }
 
-.title::after,
 .login-logo::after{
     content:"";
     display:block;
     width:110px;
-    height:1px;
+    height:2px;
     background:var(--blue);
-    margin-top:14px;
+    margin-top:12px;
+    box-shadow:0 0 18px rgba(167,236,255,.55);
+}
+
+.login-title{
+    font-size:34px;
+    font-weight:900;
+    color:white;
+    margin-bottom:8px;
+    letter-spacing:-1px;
+    text-shadow:0 2px 18px rgba(0,0,0,.65);
+}
+
+.login-sub{
+    color:rgba(255,255,255,.76);
+    font-size:14px;
+    line-height:1.6;
+    margin-bottom:26px;
+    text-shadow:0 1px 10px rgba(0,0,0,.55);
+}
+
+.login-input-wrap{
+    position:relative;
+    margin-bottom:14px;
+}
+
+.login-input-wrap input{
+    width:100%;
+    background:rgba(255,255,255,.045);
+    border:1px solid rgba(255,255,255,.18);
+    color:white;
+    outline:none;
+    padding:13px 14px;
+    font-size:14px;
+    font-weight:700;
+    backdrop-filter:blur(16px);
+}
+
+.login-input-wrap input::placeholder{
+    color:rgba(255,255,255,.56);
+    font-weight:500;
+}
+
+.btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:100%;
+    height:44px;
+    border:1px solid rgba(255,255,255,.22);
+    cursor:pointer;
+    transition:.16s ease;
+    font-weight:900;
+    font-size:14px;
+    text-decoration:none;
+}
+
+.btn-dark{
+    background:rgba(7,24,39,.48);
+    color:white;
+    backdrop-filter:blur(14px);
+}
+
+.btn-dark:hover{
+    background:rgba(16,43,67,.64);
+    border-color:var(--blue);
+    transform:translateY(-1px);
+    box-shadow:0 0 20px rgba(167,236,255,.12);
+}
+
+.btn-white{
+    background:rgba(255,255,255,.90);
+    color:#06101d;
+    border-color:white;
+}
+
+.btn-white:hover{
+    background:white;
+    transform:translateY(-1px);
+}
+
+.login-line{
+    height:1px;
+    background:rgba(255,255,255,.14);
+    margin:18px 0 14px;
+}
+
+.switch-text{
+    color:rgba(255,255,255,.74);
+    text-align:center;
+    font-size:13px;
+    margin-top:18px;
+}
+
+.switch-text a{
+    color:var(--blue);
+    font-weight:900;
+    text-decoration:none;
+}
+
+.alert-box,.success-box{
+    padding:12px 14px;
+    margin-bottom:18px;
+    font-size:14px;
+    backdrop-filter:blur(18px);
+}
+
+.alert-box{
+    background:rgba(80,0,0,.38);
+    color:#ffdede;
+    border:1px solid rgba(255,90,90,.40);
+    border-left:3px solid #ff5757;
+}
+
+.success-box{
+    background:rgba(0,70,30,.32);
+    color:#d6ffe1;
+    border:1px solid rgba(67,232,139,.38);
+    border-left:3px solid #43e88b;
+}
+
+.side{
+    width:260px;
+    padding:28px 20px;
+    border:1px solid var(--line);
+    background:rgba(7,18,29,.36);
+    backdrop-filter:blur(24px) saturate(155%);
+    -webkit-backdrop-filter:blur(24px) saturate(155%);
+    box-shadow:
+        0 22px 60px rgba(0,0,0,.38),
+        inset 0 1px 0 rgba(255,255,255,.10);
+    display:flex;
+    flex-direction:column;
+}
+
+.title{
+    font-size:12px;
+    letter-spacing:3px;
+    color:white;
+    margin-bottom:30px;
+    font-weight:900;
+    text-shadow:0 2px 12px rgba(0,0,0,.55);
+}
+
+.title::after{
+    content:"";
+    display:block;
+    width:110px;
+    height:2px;
+    background:var(--blue);
+    margin-top:12px;
+    box-shadow:0 0 18px rgba(167,236,255,.55);
 }
 
 .user-mini{
-    display:flex;
-    align-items:center;
-    gap:12px;
-    padding:0 0 22px 0;
+    background:rgba(255,255,255,.055);
+    border:1px solid rgba(255,255,255,.15);
+    padding:12px;
     margin-bottom:24px;
-    background:transparent;
-    border:none;
-    border-bottom:1px solid var(--line);
+    display:flex;
+    gap:12px;
+    align-items:center;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.07);
 }
 
 .pfp-box{
     width:46px;
     height:46px;
-    background:transparent;
-    border:1px solid var(--line);
+    background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.18);
     display:flex;
     align-items:center;
     justify-content:center;
     overflow:hidden;
+    flex:0 0 auto;
     color:white;
     font-weight:900;
     font-size:18px;
+    text-shadow:0 2px 10px rgba(0,0,0,.45);
 }
 
 .pfp-box img{
@@ -1042,6 +1093,7 @@ body{
     color:white;
     font-weight:900;
     font-size:14px;
+    text-shadow:0 2px 12px rgba(0,0,0,.55);
 }
 
 .user-mini-mail{
@@ -1056,67 +1108,103 @@ body{
 }
 
 .menu-bottom{
-    border-top:1px solid var(--line);
+    border-top:1px solid var(--line2);
     padding-top:18px;
 }
 
 .item{
     cursor:pointer;
     user-select:none;
-    transition:.12s ease;
-    line-height:2.4;
-    color:var(--muted);
-    padding:0;
+    transition:.16s ease;
+    line-height:2.35;
+    color:rgba(255,255,255,.72);
+    padding:2px 10px;
     margin-bottom:4px;
     font-size:14px;
     letter-spacing:.4px;
     text-transform:uppercase;
     font-weight:900;
-    background:transparent;
+    text-shadow:0 2px 12px rgba(0,0,0,.50);
 }
 
-.item:hover,
-.item.active{
+.item:hover,.item.active{
     color:white;
-    background:transparent;
-    box-shadow:inset 3px 0 0 var(--blue);
-    padding-left:12px;
+    background:rgba(255,255,255,.10);
+    transform:translateX(4px);
+    box-shadow:inset 2px 0 0 var(--blue);
 }
+
+.clicked{
+    animation:clickFade .35s ease;
+}
+
+@keyframes clickFade{
+    0%{opacity:1; transform:scale(1)}
+    40%{opacity:.55; transform:scale(.97)}
+    100%{opacity:1; transform:scale(1)}
+}
+
+.content{
+    flex:1;
+    padding:42px;
+    overflow-y:auto;
+    transition:opacity .22s ease,transform .22s ease;
+    border:1px solid var(--line);
+    background:rgba(7,18,29,.30);
+    backdrop-filter:blur(24px) saturate(160%);
+    -webkit-backdrop-filter:blur(24px) saturate(160%);
+    box-shadow:
+        0 22px 65px rgba(0,0,0,.36),
+        inset 0 1px 0 rgba(255,255,255,.10);
+}
+
+.content.fade{
+    opacity:0;
+    transform:translateY(8px);
+}
+
+.content::-webkit-scrollbar{width:10px}
+.content::-webkit-scrollbar-track{background:rgba(255,255,255,.035)}
+.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.22)}
 
 .page-title{
-    font-size:36px;
+    font-size:34px;
     font-weight:900;
-    margin:0 0 10px 0;
+    margin-bottom:10px;
     color:white;
     letter-spacing:-1px;
+    text-shadow:0 2px 18px rgba(0,0,0,.65);
 }
 
 .page-sub{
     color:var(--muted);
     font-size:14px;
     line-height:1.7;
-    margin:0 0 34px 0;
-    max-width:720px;
+    margin-bottom:28px;
+    text-shadow:0 1px 10px rgba(0,0,0,.55);
 }
 
 .grid{
     display:grid;
     grid-template-columns:repeat(3,minmax(0,1fr));
-    gap:0;
-    margin-bottom:34px;
-    border-top:1px solid var(--line);
-    border-bottom:1px solid var(--line);
+    gap:16px;
+    margin-bottom:28px;
 }
 
 .card{
-    background:transparent;
-    border:none;
-    border-right:1px solid var(--line);
-    padding:20px 22px;
+    background:rgba(255,255,255,.055);
+    border:1px solid rgba(255,255,255,.15);
+    padding:18px;
+    transition:.16s ease;
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.06);
 }
 
-.card:last-child{
-    border-right:none;
+.card:hover{
+    background:rgba(255,255,255,.085);
+    border-color:rgba(167,236,255,.42);
+    transform:translateY(-1px);
 }
 
 .card-label{
@@ -1131,6 +1219,7 @@ body{
     color:white;
     font-size:30px;
     font-weight:900;
+    text-shadow:0 2px 14px rgba(0,0,0,.6);
 }
 
 .card-text{
@@ -1141,93 +1230,28 @@ body{
 }
 
 .line{
-    border-left:1px solid var(--line);
+    border-left:1px solid rgba(255,255,255,.22);
     padding-left:24px;
     max-width:980px;
 }
 
-.file-row,
-.topic-row,
-.credit-row,
-.comment-row,
-.user-row,
-.dm-row{
-    margin-bottom:0;
-    padding:18px 0;
-    background:transparent;
-    border:none;
-    border-bottom:1px solid var(--line2);
-}
-
-.file-title,
-.credit-name,
-.topic-title{
-    font-size:15px;
+input,textarea{
+    background:rgba(255,255,255,.045);
     color:white;
-    margin-bottom:7px;
-    font-weight:900;
-}
-
-.meta,
-.topic-meta,
-.comment-meta,
-.small{
-    color:var(--muted);
-    font-size:14px;
-    line-height:1.7;
-}
-
-.body-text{
-    white-space:pre-wrap;
-}
-
-.file-link,
-.topic-open,
-.fake-link,
-.name-link{
-    color:var(--blue);
-    text-decoration:none;
-    font-size:14px;
-    word-break:break-all;
-    cursor:pointer;
-    font-weight:900;
-}
-
-.file-link:hover,
-.topic-open:hover,
-.fake-link:hover,
-.name-link:hover{
-    color:white;
-    text-decoration:underline;
-}
-
-.form-box{
-    margin-top:34px;
-    border-left:1px solid var(--line);
-    padding-left:24px;
-    max-width:740px;
-}
-
-input,
-textarea{
-    background:transparent;
-    color:white;
-    border:none;
-    border-bottom:1px solid var(--line);
-    padding:13px 0;
+    border:1px solid rgba(255,255,255,.18);
+    padding:13px 14px;
     outline:none;
     font-size:14px;
+    backdrop-filter:blur(16px);
 }
 
-input::placeholder,
-textarea::placeholder{
-    color:rgba(255,255,255,.45);
+input::placeholder,textarea::placeholder{
+    color:rgba(255,255,255,.55);
 }
 
-input:focus,
-textarea:focus{
+input:focus,textarea:focus{
     border-color:var(--blue);
-    background:transparent;
+    background:rgba(255,255,255,.065);
 }
 
 textarea{
@@ -1242,56 +1266,124 @@ textarea{
     margin-bottom:26px;
 }
 
-button,
-.file-button{
+.file-row,.topic-row,.credit-row,.comment-row,.user-row,.dm-row{
+    margin-bottom:16px;
+    padding:16px 18px;
+    background:rgba(255,255,255,.052);
+    border:1px solid rgba(255,255,255,.15);
+    transition:.16s ease;
+    backdrop-filter:blur(18px);
+    -webkit-backdrop-filter:blur(18px);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.06);
+}
+
+.file-row:hover,.topic-row:hover,.credit-row:hover,.comment-row:hover,.user-row:hover,.dm-row:hover{
+    background:rgba(255,255,255,.085);
+    border-color:rgba(167,236,255,.42);
+    transform:translateY(-1px);
+}
+
+.file-title,.credit-name,.topic-title{
+    font-size:15px;
+    color:white;
+    margin-bottom:7px;
+    font-weight:900;
+    text-shadow:0 2px 12px rgba(0,0,0,.55);
+}
+
+.meta,.topic-meta,.comment-meta,.small{
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
+    text-shadow:0 1px 9px rgba(0,0,0,.50);
+}
+
+.body-text{
+    white-space:pre-wrap;
+}
+
+.file-link,.topic-open,.fake-link,.name-link{
+    color:var(--blue);
+    text-decoration:none;
+    font-size:14px;
+    word-break:break-all;
+    transition:.16s ease;
+    cursor:pointer;
+    font-weight:900;
+    text-shadow:0 1px 10px rgba(0,0,0,.60);
+}
+
+.file-link:hover,.topic-open:hover,.fake-link:hover,.name-link:hover{
+    color:white;
+    padding-left:5px;
+}
+
+.form-box{
+    margin-top:32px;
+    border-left:1px solid rgba(255,255,255,.22);
+    padding-left:24px;
+    max-width:740px;
+}
+
+button,.file-button{
     display:inline-flex;
     align-items:center;
     justify-content:center;
     gap:10px;
-    background:transparent;
+    background:rgba(7,24,39,.46);
     color:white;
-    border:1px solid var(--line);
+    border:1px solid rgba(255,255,255,.20);
     padding:12px 18px;
     cursor:pointer;
-    transition:.12s ease;
+    transition:.16s ease;
     font-size:14px;
     text-decoration:none;
     font-weight:900;
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+    text-shadow:0 2px 10px rgba(0,0,0,.50);
 }
 
-button:hover,
-.file-button:hover{
-    background:rgba(255,255,255,.06);
+button:hover,.file-button:hover{
+    background:rgba(16,43,67,.58);
     border-color:var(--blue);
+    transform:translateY(-1px);
+    box-shadow:0 0 20px rgba(167,236,255,.10);
 }
 
 .primary-btn{
-    background:white;
+    background:rgba(255,255,255,.90);
     color:#06101d;
     border-color:white;
+    text-shadow:none;
 }
 
 .primary-btn:hover{
-    background:rgba(255,255,255,.86);
-    color:#06101d;
+    background:white;
+    color:#000;
 }
 
 .danger-btn{
-    background:transparent;
-    border-color:rgba(255,92,108,.55);
-    color:#ffd8dd;
+    background:rgba(80,0,0,.34);
+    border-color:rgba(255,90,90,.42);
+    color:#ffdede;
 }
 
 .danger-btn:hover{
-    background:rgba(255,92,108,.08);
-    border-color:var(--danger);
+    background:rgba(120,0,0,.50);
+    border-color:#ff5757;
 }
 
 .account-box{
     width:430px;
-    background:transparent;
-    border:none;
-    padding:0;
+    background:rgba(255,255,255,.052);
+    border:1px solid rgba(255,255,255,.15);
+    padding:28px;
+    box-shadow:
+        0 20px 55px rgba(0,0,0,.28),
+        inset 0 1px 0 rgba(255,255,255,.07);
+    backdrop-filter:blur(20px);
+    -webkit-backdrop-filter:blur(20px);
 }
 
 .login-card-title{
@@ -1300,6 +1392,7 @@ button:hover,
     margin-bottom:8px;
     font-weight:900;
     letter-spacing:-.5px;
+    text-shadow:0 2px 14px rgba(0,0,0,.60);
 }
 
 .login-card-sub{
@@ -1320,27 +1413,38 @@ a.login-btn{
     display:flex;
     align-items:center;
     justify-content:center;
-    background:transparent;
+    background:rgba(7,24,39,.46);
     color:white;
-    border:1px solid var(--line);
+    border:1px solid rgba(255,255,255,.20);
     cursor:pointer;
-    transition:.12s ease;
+    transition:.16s ease;
     font-size:14px;
     font-weight:900;
     text-decoration:none;
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
+    text-shadow:0 2px 10px rgba(0,0,0,.50);
 }
 
 button.login-btn:hover,
 a.login-btn:hover{
-    background:rgba(255,255,255,.06);
+    background:rgba(16,43,67,.58);
     border-color:var(--blue);
+    transform:translateY(-1px);
+    box-shadow:0 0 20px rgba(167,236,255,.10);
     color:white;
 }
 
 button.login-btn.primary-btn{
-    background:white;
+    background:rgba(255,255,255,.90);
     color:#06101d;
     border-color:white;
+    text-shadow:none;
+}
+
+button.login-btn.primary-btn:hover{
+    background:white;
+    color:#000;
 }
 
 .login-input{
@@ -1354,22 +1458,24 @@ button.login-btn.primary-btn{
     margin-left:10px;
 }
 
+.comment-row{
+    border-left:1px solid rgba(167,236,255,.28);
+}
+
 .account-section{
     margin-top:28px;
     padding-top:22px;
-    border-top:1px solid var(--line);
+    border-top:1px solid rgba(255,255,255,.15);
 }
 
-.account-pfp,
-.profile-head{
+.account-pfp,.profile-head{
     display:flex;
     align-items:center;
     gap:14px;
     margin-bottom:22px;
 }
 
-.account-pfp .pfp-box,
-.profile-head .pfp-box{
+.account-pfp .pfp-box,.profile-head .pfp-box{
     width:64px;
     height:64px;
     font-size:24px;
@@ -1388,7 +1494,7 @@ button.login-btn.primary-btn{
 }
 
 .credit-divider{
-    border-top:1px solid var(--line);
+    border-top:1px solid rgba(255,255,255,.18);
     width:280px;
     margin:24px 0;
 }
@@ -1396,32 +1502,36 @@ button.login-btn.primary-btn{
 .dm-message{
     max-width:70%;
     margin-bottom:12px;
-    padding:12px 0;
-    border:none;
-    border-bottom:1px solid var(--line2);
-    background:transparent;
+    padding:12px 14px;
+    border:1px solid rgba(255,255,255,.13);
+    background:rgba(255,255,255,.052);
+    backdrop-filter:blur(16px);
 }
 
 .dm-message.me{
     margin-left:auto;
-    border-color:rgba(159,231,255,.28);
+    background:rgba(167,236,255,.10);
+    border-color:rgba(167,236,255,.24);
 }
 
 .dm-message.them{
     margin-right:auto;
+    background:rgba(255,255,255,.045);
 }
 
 .audio-player{
     margin-top:14px;
-    padding:8px 0 0 0;
+    padding:10px 0 0 0;
     border:none;
     background:transparent;
+    backdrop-filter:none;
+    -webkit-backdrop-filter:none;
 }
 
 .audio-controls{
     display:flex;
     align-items:center;
-    gap:12px;
+    gap:10px;
 }
 
 .audio-controls .audio-btn{
@@ -1429,19 +1539,24 @@ button.login-btn.primary-btn{
     height:auto;
     min-width:0;
     min-height:0;
-    padding:0;
+    padding:0 2px;
     border:none!important;
     outline:none!important;
     background:transparent!important;
     box-shadow:none!important;
     color:white;
-    font-size:15px;
+    font-size:16px;
     line-height:1;
+    text-shadow:0 0 12px rgba(167,236,255,.60);
+    backdrop-filter:none!important;
+    -webkit-backdrop-filter:none!important;
 }
 
 .audio-controls .audio-btn:hover{
     background:transparent!important;
     border:none!important;
+    transform:scale(1.13);
+    box-shadow:none!important;
     color:var(--blue);
 }
 
@@ -1467,88 +1582,9 @@ button.login-btn.primary-btn{
     display:inline-block;
     width:7px;
     height:7px;
-    background:var(--good);
+    background:#43e88b;
     margin-left:8px;
-}
-
-.login-only{
-    height:100vh;
-    display:flex;
-    justify-content:center;
-    align-items:center;
-    padding:20px;
-}
-
-.login-shell{
-    width:390px;
-    background:transparent;
-    border-left:1px solid var(--line);
-    border-right:1px solid var(--line);
-    padding:32px;
-}
-
-.login-title{
-    font-size:34px;
-    font-weight:900;
-    color:white;
-    margin-bottom:8px;
-    letter-spacing:-1px;
-}
-
-.login-sub{
-    color:var(--muted);
-    font-size:14px;
-    line-height:1.6;
-    margin-bottom:26px;
-}
-
-.login-input-wrap{
-    margin-bottom:14px;
-}
-
-.login-input-wrap input{
-    width:100%;
-}
-
-.switch-text{
-    color:var(--muted);
-    text-align:center;
-    font-size:13px;
-    margin-top:18px;
-}
-
-.switch-text a{
-    color:var(--blue);
-    font-weight:900;
-    text-decoration:none;
-}
-
-.alert-box,
-.success-box{
-    padding:12px 0 12px 14px;
-    margin-bottom:18px;
-    font-size:14px;
-    border-top:none;
-    border-right:none;
-    border-bottom:none;
-}
-
-.alert-box{
-    background:transparent;
-    color:#ffdede;
-    border-left:3px solid var(--danger);
-}
-
-.success-box{
-    background:transparent;
-    color:#d6ffe1;
-    border-left:3px solid var(--good);
-}
-
-.login-line{
-    height:1px;
-    background:var(--line);
-    margin:18px 0 14px;
+    box-shadow:0 0 12px rgba(67,232,139,.85);
 }
 
 @media(max-width:900px){
@@ -1564,8 +1600,6 @@ button.login-btn.primary-btn{
 
     .side{
         width:100%;
-        border-right:none;
-        border-bottom:1px solid var(--line);
     }
 
     .content{
@@ -1576,17 +1610,7 @@ button.login-btn.primary-btn{
         grid-template-columns:1fr;
     }
 
-    .card{
-        border-right:none;
-        border-bottom:1px solid var(--line);
-    }
-
-    .card:last-child{
-        border-bottom:none;
-    }
-
-    .account-box,
-    .search-bar{
+    .account-box,.search-bar{
         width:100%;
     }
 }
@@ -1613,26 +1637,9 @@ button.login-btn.primary-btn{
             {% endif %}
         {% endwith %}
 
-        {% if auth_mode == "verify" %}
-            <div class="login-title">Verify email</div>
-            <div class="login-sub">Enter the code sent to your email. Account will only be created after this.</div>
-
-            <form action="/verify-email" method="POST">
-                <div class="login-input-wrap">
-                    <input name="code" placeholder="Verification code" required>
-                </div>
-
-                <button class="btn btn-white" type="submit">Verify Email</button>
-            </form>
-
-            <div class="login-line"></div>
-            <button class="btn btn-dark" onclick="location.href='/resend-code'">Resend Code</button>
-            <br><br>
-            <button class="btn btn-dark" onclick="location.href='/cancel-verification'">Cancel</button>
-
-        {% elif auth_mode == "register" %}
+        {% if auth_mode == "register" %}
             <div class="login-title">Create account</div>
-            <div class="login-sub">Use a real working email. Fake, temporary, or non-working emails are blocked.</div>
+            <div class="login-sub">Join the producer room. Upload beats, ZIP packs, patterns and discussions.</div>
 
             <form action="/register" method="POST">
                 <div class="login-input-wrap">
@@ -1640,14 +1647,14 @@ button.login-btn.primary-btn{
                 </div>
 
                 <div class="login-input-wrap">
-                    <input name="email" type="email" placeholder="Real email" required>
+                    <input name="email" type="email" placeholder="Email" required>
                 </div>
 
                 <div class="login-input-wrap">
                     <input name="password" type="password" placeholder="Password" required>
                 </div>
 
-                <button class="btn btn-white" type="submit">Send Verification Code</button>
+                <button class="btn btn-white" type="submit">Create Account</button>
             </form>
 
             <div class="login-line"></div>
@@ -1766,6 +1773,9 @@ let currentViewId = startTopicId || "";
 
 function clickEffect(el){
     if(!el) return;
+    el.classList.remove("clicked");
+    void el.offsetWidth;
+    el.classList.add("clicked");
 }
 
 document.addEventListener("click", function(e){
@@ -1785,7 +1795,7 @@ function fadeChange(html){
         bindFileInput();
         bindPfpInput();
         bindAudioPlayers();
-    },120);
+    },160);
 }
 
 function bindFileInput(){
@@ -1943,6 +1953,7 @@ function showDashboard(button){
 
     setUrl("dashboard");
 
+    const totalComments = discussions.reduce((sum, t)=>sum + t.comments.length, 0);
     const recentTopics = discussions.slice(0,3);
     const recentFiles = files.slice(0,3);
 
@@ -2056,7 +2067,7 @@ function showFiles(button){
                 <br><br>
                 <button class="primary-btn" type="submit">upload file</button>
             </form>
-            <p class="small">allowed: zip and mp3 only. maximum size: ${maxFileMb} MB.</p>
+            <p class="small">allowed: zip and mp3 only. maximum size: ${maxFileMb} MB. files are checked with basic no-api safety scan.</p>
         </div>
     `;
 
@@ -2552,7 +2563,12 @@ function showCredits(button){
 
     credits["OWNERS"].forEach(person=>{
         html+=`
-            <div class="credit-row">
+            <div if(button) button.classList.add("active");
+
+    setUrl("credits");
+
+    let html=`
+        <div class="credit-row">
                 <div class="credit-name">${escapeHtml(person)}</div>
             </div>
         `;
@@ -2594,6 +2610,14 @@ function updateNotificationBadge(){
     if(!badge) return;
 
     badge.textContent = notificationCount;
+
+    if(notificationCount > 0){
+        badge.style.color = "#9fe7ff";
+        badge.style.textShadow = "0 0 12px rgba(167,236,255,.8)";
+    }else{
+        badge.style.color = "#9fe7ff";
+        badge.style.textShadow = "none";
+    }
 }
 
 function isUserTyping(){
@@ -2726,12 +2750,9 @@ def home():
     requested_id = request.args.get("id", "")
 
     if not logged_in:
-        if requested_view == "verify" and session.get("pending_register"):
-            auth_mode = "verify"
-        elif requested_view == "register":
-            auth_mode = "register"
-        else:
-            auth_mode = "login"
+        auth_mode = "register" if requested_view == "register" else "login"
+        requested_view = "login"
+        requested_id = ""
 
         return render_template_string(
             HTML,
@@ -2747,8 +2768,8 @@ def home():
             username="",
             current_user_id="",
             pfp_url="",
-            start_view="login",
-            start_item_id="",
+            start_view=requested_view,
+            start_item_id=requested_id,
             auth_mode=auth_mode,
             max_file_mb=MAX_FILE_SIZE // (1024 * 1024),
             post_cooldown=POST_COOLDOWN_SECONDS,
@@ -2757,7 +2778,7 @@ def home():
 
     auth_mode = ""
 
-    if requested_view in ["login", "register", "verify", ""]:
+    if requested_view in ["login", "register", ""]:
         requested_view = "dashboard"
 
     allowed_views = {
@@ -2776,17 +2797,17 @@ def home():
         flash(f"Discord database error: {e}", "error")
         db = blank_db()
         store = {"pfp_urls": {}, "file_urls": {}}
-        user = None
+        user = {
+            "id": current_user_id(),
+            "email": current_email(),
+            "username": current_email(),
+            "about": ""
+        }
 
     if not user:
         session.clear()
         flash("Account not found. Please login again.", "error")
         return redirect(url_for("home", view="login"))
-
-    if user.get("email_verified") is not True:
-        session.clear()
-        flash("This account is old or unverified. Please register again with a real email.", "error")
-        return redirect(url_for("home", view="register"))
 
     state = build_client_state(db, store, user)
 
@@ -2823,17 +2844,15 @@ def register():
         return redirect(url_for("home", view="register"))
 
     username = request.form.get("username", "").strip()
-    email = normalize_email(request.form.get("email", ""))
+    email = request.form.get("email", "").strip().lower()
     password = request.form.get("password", "")
 
     if not valid_username(username):
         flash("Username must be 3-20 characters and only use letters, numbers, underscore, or dot.", "error")
         return redirect(url_for("home", view="register"))
 
-    email_ok, email_reason = validate_real_email(email)
-
-    if not email_ok:
-        flash(email_reason, "error")
+    if "@" not in email or "." not in email:
+        flash("Invalid email address.", "error")
         return redirect(url_for("home", view="register"))
 
     if len(password) < 6:
@@ -2841,115 +2860,21 @@ def register():
         return redirect(url_for("home", view="register"))
 
     user_id = user_id_from_email(email)
-    changed = False
 
-    for existing_id, existing_user in list(db["users"].items()):
-        existing_email = normalize_email(existing_user.get("email", ""))
-        existing_username = existing_user.get("username", "").strip().lower()
-        is_verified = existing_user.get("email_verified") is True
+    if user_id in db["users"]:
+        flash("Account already exists. Please login instead.", "error")
+        return redirect(url_for("home", view="login"))
 
-        if not is_verified and (existing_email == email or existing_username == username.lower()):
-            db["users"].pop(existing_id, None)
-            changed = True
-            continue
-
-        if is_verified and existing_email == email:
-            flash("Account already exists. Please login instead.", "error")
-            return redirect(url_for("home", view="login"))
-
-        if is_verified and existing_username == username.lower():
-            flash("Username already exists. Choose another one.", "error")
-            return redirect(url_for("home", view="register"))
-
-    if changed:
-        try:
-            save_db(db)
-        except Exception:
-            pass
-
-    code = str(secrets.randbelow(900000) + 100000)
-
-    try:
-        send_verification_email(email, code)
-    except Exception as e:
-        flash(f"Could not send verification email: {e}", "error")
-        return redirect(url_for("home", view="register"))
-
-    session["pending_register"] = {
-        "id": user_id,
-        "username": username,
-        "email": email,
-        "password_hash": generate_password_hash(password),
-        "code_hash": code_hash(code),
-        "expires": int(time.time()) + EMAIL_CODE_EXPIRE_SECONDS,
-        "created": int(time.time())
-    }
-
-    flash("Verification code sent. Check your email.", "success")
-    return redirect(url_for("home", view="verify"))
-
-
-@app.route("/verify-email", methods=["POST"])
-def verify_email():
-    pending = session.get("pending_register")
-
-    if not pending:
-        flash("No pending verification. Please register again.", "error")
-        return redirect(url_for("home", view="register"))
-
-    if int(time.time()) > int(pending.get("expires", 0)):
-        session.pop("pending_register", None)
-        flash("Verification code expired. Please register again.", "error")
-        return redirect(url_for("home", view="register"))
-
-    code = request.form.get("code", "").strip()
-
-    if code_hash(code) != pending.get("code_hash"):
-        flash("Wrong verification code.", "error")
-        return redirect(url_for("home", view="verify"))
-
-    email = normalize_email(pending.get("email", ""))
-    email_ok, email_reason = validate_real_email(email)
-
-    if not email_ok:
-        session.pop("pending_register", None)
-        flash(email_reason, "error")
-        return redirect(url_for("home", view="register"))
-
-    try:
-        store = load_store(force=True)
-        db = store["db"]
-    except Exception as e:
-        flash(f"Discord database error: {e}", "error")
-        return redirect(url_for("home", view="verify"))
-
-    user_id = pending.get("id")
-
-    for existing_id, existing_user in list(db["users"].items()):
-        existing_email = normalize_email(existing_user.get("email", ""))
-        existing_username = existing_user.get("username", "").strip().lower()
-        is_verified = existing_user.get("email_verified") is True
-
-        if not is_verified and (existing_email == email or existing_id == user_id):
-            db["users"].pop(existing_id, None)
-
-        if is_verified and existing_email == email:
-            session.pop("pending_register", None)
-            flash("Account already exists. Please login instead.", "error")
-            return redirect(url_for("home", view="login"))
-
-        if is_verified and existing_username == pending.get("username", "").strip().lower():
-            session.pop("pending_register", None)
+    for existing_user in db["users"].values():
+        if existing_user.get("username", "").strip().lower() == username.lower():
             flash("Username already exists. Choose another one.", "error")
             return redirect(url_for("home", view="register"))
 
     user = {
         "id": user_id,
-        "username": pending.get("username"),
+        "username": username,
         "email": email,
-        "password_hash": pending.get("password_hash"),
-        "email_verified": True,
-        "email_verified_at": int(time.time()),
+        "password_hash": generate_password_hash(password),
         "pfp_id": "",
         "pfp_updated": 0,
         "about": "",
@@ -2964,96 +2889,31 @@ def verify_email():
     try:
         save_db(db)
     except Exception as e:
-        flash(f"Could not save account to Discord DB: {e}", "error")
-        return redirect(url_for("home", view="verify"))
+        flash(f"Could not save user to Discord DB: {e}", "error")
+        return redirect(url_for("home", view="register"))
 
-    session.pop("pending_register", None)
     session["email"] = email
 
-    flash("Email verified. Account created successfully.", "success")
+    flash("Account created successfully.", "success")
     return go("dashboard")
-
-
-@app.route("/resend-code")
-def resend_code():
-    pending = session.get("pending_register")
-
-    if not pending:
-        flash("No pending verification.", "error")
-        return redirect(url_for("home", view="register"))
-
-    email = normalize_email(pending.get("email", ""))
-    email_ok, email_reason = validate_real_email(email)
-
-    if not email_ok:
-        session.pop("pending_register", None)
-        flash(email_reason, "error")
-        return redirect(url_for("home", view="register"))
-
-    code = str(secrets.randbelow(900000) + 100000)
-
-    try:
-        send_verification_email(email, code)
-    except Exception as e:
-        flash(f"Could not resend code: {e}", "error")
-        return redirect(url_for("home", view="verify"))
-
-    pending["code_hash"] = code_hash(code)
-    pending["expires"] = int(time.time()) + EMAIL_CODE_EXPIRE_SECONDS
-    session["pending_register"] = pending
-
-    flash("New verification code sent.", "success")
-    return redirect(url_for("home", view="verify"))
-
-
-@app.route("/cancel-verification")
-def cancel_verification():
-    session.pop("pending_register", None)
-    flash("Verification cancelled.", "success")
-    return redirect(url_for("home", view="register"))
 
 
 @app.route("/login", methods=["POST"])
 def login():
     try:
-        db = load_store(force=True)["db"]
+        db = load_store()["db"]
     except Exception as e:
         flash(f"Discord database error: {e}", "error")
         return redirect(url_for("home", view="login"))
 
-    email = normalize_email(request.form.get("email", ""))
+    email = request.form.get("email", "").strip().lower()
     password = request.form.get("password", "")
 
-    user_id = user_id_from_email(email)
-    user = db["users"].get(user_id)
+    user = db["users"].get(user_id_from_email(email))
 
     if not user:
         flash("Account not found. Please create an account first.", "error")
         return redirect(url_for("home", view="login"))
-
-    if user.get("email_verified") is not True:
-        db["users"].pop(user_id, None)
-
-        try:
-            save_db(db)
-        except Exception:
-            pass
-
-        flash("Old unverified account removed. Please register again with a real email.", "error")
-        return redirect(url_for("home", view="register"))
-
-    email_ok, email_reason = validate_real_email(user.get("email", ""))
-
-    if not email_ok:
-        db["users"].pop(user_id, None)
-
-        try:
-            save_db(db)
-        except Exception:
-            pass
-
-        flash("Invalid email account removed. Please register again with a real email.", "error")
-        return redirect(url_for("home", view="register"))
 
     if not check_password_hash(user.get("password_hash", ""), password):
         flash("Wrong password. Please try again.", "error")
@@ -3080,6 +2940,11 @@ def change_username():
     db = store["db"]
     user = db["users"].get(current_user_id())
 
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
     new_username = request.form.get("new_username", "").strip()
 
     if not valid_username(new_username):
@@ -3087,9 +2952,6 @@ def change_username():
         return go("account")
 
     for existing_user in db["users"].values():
-        if existing_user.get("email_verified") is not True:
-            continue
-
         same_username = existing_user.get("username", "").strip().lower() == new_username.lower()
         different_account = existing_user.get("id") != user.get("id")
 
@@ -3118,6 +2980,11 @@ def change_about():
     db = store["db"]
     user = db["users"].get(current_user_id())
 
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
     about = request.form.get("about", "").strip()
 
     user["about"] = about[:500]
@@ -3140,6 +3007,11 @@ def change_password():
     store = load_store()
     db = store["db"]
     user = db["users"].get(current_user_id())
+
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
 
     old_password = request.form.get("old_password", "")
     new_password = request.form.get("new_password", "")
@@ -3172,6 +3044,11 @@ def change_pfp():
     store = load_store()
     db = store["db"]
     user = db["users"].get(current_user_id())
+
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
 
     if "pfp" not in request.files:
         flash("No profile picture selected.", "error")
@@ -3240,6 +3117,11 @@ def upload():
     db = store["db"]
     user = db["users"].get(current_user_id())
 
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
     if "uploadfile" not in request.files:
         flash("No file selected.", "error")
         return go("files")
@@ -3303,7 +3185,7 @@ def upload():
         flash(f"File uploaded, but DB update failed: {e}", "error")
         return go("files")
 
-    flash("File uploaded successfully.", "success")
+    flash("File uploaded successfully. Basic safety check passed.", "success")
     return go("files")
 
 
@@ -3425,6 +3307,11 @@ def add_topic():
     db = store["db"]
     user = db["users"].get(current_user_id())
 
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
     left = cooldown_left(user, "last_topic_at", POST_COOLDOWN_SECONDS)
 
     if left > 0:
@@ -3469,6 +3356,11 @@ def add_comment(topic_id):
     store = load_store()
     db = store["db"]
     user = db["users"].get(current_user_id())
+
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
 
     if topic_id not in db["topics"]:
         flash("Topic not found.", "error")
@@ -3519,6 +3411,11 @@ def delete_topic_route(topic_id):
     user = db["users"].get(current_user_id())
     topic = db["topics"].get(topic_id)
 
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
     if not topic:
         flash("Topic not found.", "error")
         return go("discussion")
@@ -3552,7 +3449,12 @@ def send_dm(target_id):
     sender = db["users"].get(current_user_id())
     target = db["users"].get(target_id)
 
-    if not target or target.get("email_verified") is not True:
+    if not sender:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
+    if not target:
         flash("User not found.", "error")
         return go("messages")
 
@@ -3595,8 +3497,8 @@ def live_state():
         db = store["db"]
         user = db["users"].get(current_user_id())
 
-        if not user or user.get("email_verified") is not True:
-            return jsonify({"ok": False, "error": "Account not verified"}), 401
+        if not user:
+            return jsonify({"ok": False, "error": "Account not found"}), 401
 
         state = build_client_state(db, store, user)
         state["ok"] = True
@@ -3637,15 +3539,11 @@ def discord_test():
 
         post_discord_text(f"SWTEST|website connected|{int(time.time())}")
 
-        verified_count = len([u for u in db["users"].values() if u.get("email_verified") is True])
-        unverified_count = len([u for u in db["users"].values() if u.get("email_verified") is not True])
-
         return (
             "DISCORD DATABASE WORKS<br>"
             f"Messages scanned: {store['message_count']}<br>"
             f"Snapshot loaded: {store['snapshot_loaded']}<br>"
-            f"Verified users: {verified_count}<br>"
-            f"Old/unverified users: {unverified_count}<br>"
+            f"Users: {len(db['users'])}<br>"
             f"Topics: {len(db['topics'])}<br>"
             f"Comments: {len(db['comments'])}<br>"
             f"Files: {len(db['files'])}<br>"
