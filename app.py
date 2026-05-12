@@ -950,9 +950,52 @@ def go(view="dashboard", item_id=None):
 
 
 def public_file(file_data, db=None):
+    if db is None:
+        db = load_store()["db"]
+
     name = file_data.get("original_name", "file")
     ext = file_ext(name)
     file_id = file_data.get("id", "")
+
+    file_comments = [
+        c for c in db["comments"].values()
+        if c.get("file_id") == file_id
+    ]
+
+    file_comments.sort(key=lambda c: int(c.get("created", 0)))
+
+    return {
+        "id": file_id,
+        "name": name,
+        "size": size_text(file_data.get("size", 0)),
+        "category": file_category(name),
+        "author": username_from_id(
+            file_data.get("author_id", ""),
+            db,
+            file_data.get("author", "unknown"),
+        ),
+        "author_id": file_data.get("author_id", ""),
+        "created": int(file_data.get("created", 0)),
+        "is_audio": ext in AUDIO_EXTENSIONS,
+        "is_image": ext in IMAGE_EXTENSIONS,
+        "is_video": ext in VIDEO_EXTENSIONS,
+        "is_fl": ext in FL_STUDIO_EXTENSIONS,
+        "media_url": url_for("media_file", file_id=file_id),
+        "comments": [
+            {
+                "id": c.get("id", ""),
+                "body": c.get("body", ""),
+                "author": username_from_id(
+                    c.get("author_id", ""),
+                    db,
+                    c.get("author", "unknown"),
+                ),
+                "author_id": c.get("author_id", ""),
+                "created": int(c.get("created", 0)),
+            }
+            for c in file_comments
+        ],
+    }
 
     return {
         "id": file_id,
@@ -1700,6 +1743,22 @@ audio::-webkit-media-controls-panel{
                         {% elif file.is_video %}
                             <div class="preview"><video controls src="{{ file.media_url }}"></video></div>
                         {% endif %}
+                        <br>
+<div class="meta">{{ file.comments|length }} file comments</div>
+
+{% for comment in file.comments[:2] %}
+    <div class="row" style="margin-left:18px;">
+        <div class="meta">
+            <a href="/?view=profile&id={{ comment.author_id }}">{{ comment.author }}</a>
+        </div>
+        <div class="small body-text">{{ comment.body }}</div>
+    </div>
+{% endfor %}
+
+<form action="/file-comment/{{ file.id }}" method="POST" style="margin-top:12px;">
+    <textarea name="body" placeholder="comment under this file" required></textarea>
+    <button class="primary" type="submit">comment</button>
+</form>
                     </div>
                 {% endfor %}
 
@@ -1749,6 +1808,26 @@ audio::-webkit-media-controls-panel{
                         {% elif file.is_video %}
                             <div class="preview"><video controls src="{{ file.media_url }}"></video></div>
                         {% endif %}
+                        <br>
+<div class="row-title">comments</div>
+
+{% if file.comments|length == 0 %}
+    <div class="small">No comments under this file yet.</div>
+{% endif %}
+
+{% for comment in file.comments %}
+    <div class="row" style="margin-left:18px;">
+        <div class="meta">
+            <a href="/?view=profile&id={{ comment.author_id }}">{{ comment.author }}</a>
+        </div>
+        <div class="small body-text">{{ comment.body }}</div>
+    </div>
+{% endfor %}
+
+<form action="/file-comment/{{ file.id }}" method="POST" style="margin-top:12px;">
+    <textarea name="body" placeholder="comment under this file" required></textarea>
+    <button class="primary" type="submit">comment</button>
+</form>
                     </div>
                 {% endfor %}
             </div>
@@ -2570,7 +2649,6 @@ def upload():
         "author_id": user.get("id"),
         "created": int(time.time()),
     }
-    
     db["files"][file_id] = metadata
 
     try:
@@ -2754,32 +2832,34 @@ def add_topic():
 
 @app.route("/comment/<topic_id>", methods=["POST"])
 @login_required
-def add_comment(topic_id):
+@app.route("/file-comment/<file_id>", methods=["POST"])
+@login_required
+def add_file_comment(file_id):
     store = load_store(force=True)
     db = store["db"]
     user = db["users"].get(current_user_id())
 
-    if topic_id not in db["topics"]:
-        flash("Topic not found.", "error")
-        return go("discussion")
+    if file_id not in db["files"]:
+        flash("File not found.", "error")
+        return go("files")
 
     left = cooldown_left(user, "last_comment_at", COMMENT_COOLDOWN_SECONDS)
 
     if left > 0:
         flash(f"Slow down. You can comment again in {left} seconds.", "error")
-        return go("topic", topic_id)
+        return go("files")
 
     body = request.form.get("body", "").strip()
 
     if not body:
         flash("Comment cannot be empty.", "error")
-        return go("topic", topic_id)
+        return go("files")
 
     comment_id = secrets.token_hex(12)
 
     comment = {
         "id": comment_id,
-        "topic_id": topic_id,
+        "file_id": file_id,
         "body": body[:900],
         "author": user.get("username"),
         "author_id": user.get("id"),
@@ -2794,11 +2874,11 @@ def add_comment(topic_id):
         save_db(db)
         clear_cache()
     except Exception as e:
-        flash(f"Could not save comment to Discord DB: {e}", "error")
-        return go("topic", topic_id)
+        flash(f"Could not save file comment to Discord DB: {e}", "error")
+        return go("files")
 
-    flash("Comment added.", "success")
-    return go("topic", topic_id)
+    flash("Comment added under file.", "success")
+    return go("files")
 
 
 @app.route("/delete-topic/<topic_id>", methods=["POST"])
