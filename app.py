@@ -1506,11 +1506,12 @@ button.login-btn.primary-btn:hover{
 
 .audio-player{
     margin-top:14px;
-    padding:10px 0;
-    border:none;
-    background:transparent;
-    backdrop-filter:none;
-    -webkit-backdrop-filter:none;
+    padding:12px;
+    border:1px solid rgba(255,255,255,.16);
+    border-radius:8px;
+    background:rgba(255,255,255,.055);
+    backdrop-filter:blur(16px);
+    -webkit-backdrop-filter:blur(16px);
 }
 
 .audio-controls{
