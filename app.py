@@ -2830,8 +2830,7 @@ def add_topic():
     return go("topic", topic_id)
 
 
-@app.route("/comment/<topic_id>", methods=["POST"])
-@login_required
+
 @app.route("/file-comment/<file_id>", methods=["POST"])
 @login_required
 def add_file_comment(file_id):
