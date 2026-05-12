@@ -1506,12 +1506,11 @@ button.login-btn.primary-btn:hover{
 
 .audio-player{
     margin-top:14px;
-    padding:12px;
-    border:1px solid rgba(255,255,255,.16);
-    border-radius:8px;
-    background:rgba(255,255,255,.055);
-    backdrop-filter:blur(16px);
-    -webkit-backdrop-filter:blur(16px);
+    padding:10px 0;
+    border:none;
+    background:transparent;
+    backdrop-filter:none;
+    -webkit-backdrop-filter:none;
 }
 
 .audio-controls{
@@ -1520,11 +1519,25 @@ button.login-btn.primary-btn:hover{
     gap:8px;
 }
 
-.audio-btn{
-    width:38px;
+.audio-controls .audio-btn{
+    width:34px;
     height:34px;
     padding:0;
-    border-radius:6px;
+    border:none;
+    outline:none;
+    background:transparent;
+    box-shadow:none;
+    color:white;
+    font-size:16px;
+    border-radius:50%;
+    text-shadow:0 0 12px rgba(167,236,255,.65);
+}
+
+.audio-controls .audio-btn:hover{
+    background:rgba(167,236,255,.13);
+    border:none;
+    transform:scale(1.08);
+    box-shadow:0 0 18px rgba(167,236,255,.20);
 }
 
 .audio-range{
