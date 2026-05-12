@@ -1,183 +1,379 @@
 import os
 import json
 import time
+import base64
+import hashlib
 import secrets
+from io import BytesIO
 from functools import wraps
 
-from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory, session, flash
-from werkzeug.utils import secure_filename
+import requests
+from flask import (
+    Flask,
+    render_template_string,
+    request,
+    redirect,
+    url_for,
+    session,
+    flash,
+    send_file
+)
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "uploads")
-DATA_FOLDER = os.environ.get("DATA_FOLDER", "data")
-PROFILE_PICS_FOLDER = os.path.join(UPLOAD_FOLDER, "profile_pics")
+# ============================================================
+# CONFIG
+# ============================================================
 
-USERS_FILE = os.path.join(DATA_FOLDER, "users.json")
-DISCUSSION_FILE = os.path.join(DATA_FOLDER, "discussions.json")
-FILES_META_FILE = os.path.join(DATA_FOLDER, "files_meta.json")
-NOTIFICATIONS_FILE = os.path.join(DATA_FOLDER, "notifications.json")
-SECRET_FILE = os.path.join(DATA_FOLDER, "secret_key.txt")
+app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(64))
 
-MAX_FILE_SIZE = 1024 * 1024 * 1024
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+DISCORD_DB_CHANNEL_ID = os.environ.get("DISCORD_DB_CHANNEL_ID", "").strip()
+
+DISCORD_API = "https://discord.com/api/v10"
+
+MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", str(8 * 1024 * 1024)))
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
+
 ALLOWED_EXTENSIONS = {".zip", ".mp3"}
-ALLOWED_PROFILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
-CREDITS = {
-    "OWNERS": ["DJ TUTTER", "DJ LIRA DA ZL"],
-    "MEMBERS": ["DJ FRG 011", "DJ PLT 011", "DJ RGLX", "DJ RDC", "DJ SABA 7", "DJ RE7 013", "RSFI"],
-    "WEBSITE MADE BY": ["DJ SABA 7"]
+CACHE_SECONDS = 3
+CACHE = {
+    "time": 0,
+    "db": None
 }
 
 
-def setup_project_files():
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    os.makedirs(PROFILE_PICS_FOLDER, exist_ok=True)
-    os.makedirs(DATA_FOLDER, exist_ok=True)
-    os.makedirs("static", exist_ok=True)
+CREDITS = {
+    "OWNERS": [
+        "DJ TUTTER",
+        "DJ LIRA DA ZL"
+    ],
+    "MEMBERS": [
+        "DJ FRG 011",
+        "DJ PLT 011",
+        "DJ RGLX",
+        "DJ RDC",
+        "DJ SABA 7",
+        "DJ RE7 013",
+        "RSFI",
+        "DJ RDC"
+    ],
+    "WEBSITE MADE BY": [
+        "DJ SABA 7"
+    ]
+}
 
-    default_files = {
-        USERS_FILE: {},
-        DISCUSSION_FILE: [],
-        FILES_META_FILE: {},
-        NOTIFICATIONS_FILE: []
+
+# ============================================================
+# DISCORD DATABASE SYSTEM
+# ============================================================
+
+def require_discord_config():
+    if not DISCORD_BOT_TOKEN:
+        raise RuntimeError("Missing DISCORD_BOT_TOKEN environment variable.")
+    if not DISCORD_DB_CHANNEL_ID:
+        raise RuntimeError("Missing DISCORD_DB_CHANNEL_ID environment variable.")
+
+
+def discord_headers():
+    require_discord_config()
+    return {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}"
     }
 
-    for path, default_data in default_files.items():
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(default_data, f, indent=4, ensure_ascii=False)
 
-    if not os.path.exists(SECRET_FILE):
-        with open(SECRET_FILE, "w", encoding="utf-8") as f:
-            f.write(secrets.token_hex(64))
+def discord_request(method, url, **kwargs):
+    require_discord_config()
 
+    headers = kwargs.pop("headers", {})
+    merged_headers = discord_headers()
+    merged_headers.update(headers)
 
-setup_project_files()
+    for _ in range(4):
+        response = requests.request(
+            method,
+            url,
+            headers=merged_headers,
+            timeout=30,
+            **kwargs
+        )
 
+        if response.status_code == 429:
+            try:
+                retry_after = float(response.json().get("retry_after", 1))
+            except Exception:
+                retry_after = 1
+            time.sleep(retry_after)
+            continue
 
-def get_secret_key():
-    env_key = os.environ.get("SECRET_KEY")
-    if env_key:
-        return env_key
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError(
+                f"Discord API error {response.status_code}: {response.text[:500]}"
+            )
 
-    with open(SECRET_FILE, "r", encoding="utf-8") as f:
-        return f.read().strip()
+        return response
 
-
-app.secret_key = get_secret_key()
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
-
-
-def load_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    raise RuntimeError("Discord API rate limit retry failed.")
 
 
-def load_users():
-    return load_json(USERS_FILE, {})
+def encode_json(data):
+    raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8")
 
 
-def save_users(users):
-    save_json(USERS_FILE, users)
+def decode_json(encoded):
+    padding = "=" * (-len(encoded) % 4)
+    raw = base64.urlsafe_b64decode((encoded + padding).encode("utf-8"))
+    return json.loads(raw.decode("utf-8"))
 
 
-def load_discussions():
-    return load_json(DISCUSSION_FILE, [])
+def user_key(email):
+    email = email.strip().lower()
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()
 
 
-def save_discussions(data):
-    save_json(DISCUSSION_FILE, data)
+def make_record_message(kind, key, data):
+    data = dict(data)
+    data["updated_at"] = int(time.time())
+
+    encoded = encode_json(data)
+    content = f"SWDB|{kind}|{key}|{encoded}"
+
+    if len(content) > 1900:
+        raise ValueError("Data is too long for one Discord message. Make the text shorter.")
+
+    return content
 
 
-def load_files_meta():
-    return load_json(FILES_META_FILE, {})
+def make_file_message(metadata):
+    metadata = dict(metadata)
+    metadata["updated_at"] = int(time.time())
+
+    encoded = encode_json(metadata)
+    content = f"SWFILE|{encoded}"
+
+    if len(content) > 1900:
+        raise ValueError("File metadata is too long for one Discord message.")
+
+    return content
 
 
-def save_files_meta(data):
-    save_json(FILES_META_FILE, data)
+def fetch_all_discord_messages():
+    url = f"{DISCORD_API}/channels/{DISCORD_DB_CHANNEL_ID}/messages"
+
+    all_messages = []
+    before = None
+
+    for _ in range(25):
+        params = {
+            "limit": 100
+        }
+
+        if before:
+            params["before"] = before
+
+        response = discord_request("GET", url, params=params)
+        messages = response.json()
+
+        if not messages:
+            break
+
+        all_messages.extend(messages)
+        before = messages[-1]["id"]
+
+        if len(messages) < 100:
+            break
+
+    return all_messages
 
 
-def load_notifications():
-    return load_json(NOTIFICATIONS_FILE, [])
+def post_discord_message(content):
+    url = f"{DISCORD_API}/channels/{DISCORD_DB_CHANNEL_ID}/messages"
+
+    response = discord_request(
+        "POST",
+        url,
+        headers={"Content-Type": "application/json"},
+        json={"content": content}
+    )
+
+    CACHE["time"] = 0
+    CACHE["db"] = None
+
+    return response.json()
 
 
-def save_notifications(data):
-    save_json(NOTIFICATIONS_FILE, data)
+def post_discord_file(content, filename, file_bytes, content_type):
+    url = f"{DISCORD_API}/channels/{DISCORD_DB_CHANNEL_ID}/messages"
+
+    payload = {
+        "content": content
+    }
+
+    files = {
+        "payload_json": (None, json.dumps(payload), "application/json"),
+        "files[0]": (filename, BytesIO(file_bytes), content_type or "application/octet-stream")
+    }
+
+    response = discord_request("POST", url, files=files)
+
+    CACHE["time"] = 0
+    CACHE["db"] = None
+
+    return response.json()
 
 
-def current_user():
+def load_db():
+    now = time.time()
+
+    if CACHE["db"] is not None and now - CACHE["time"] < CACHE_SECONDS:
+        return CACHE["db"]
+
+    messages = fetch_all_discord_messages()
+
+    users = {}
+    topics = {}
+    comments = {}
+    files = {}
+
+    # Discord returns newest first.
+    # For users/topics, newest record wins.
+    for message in messages:
+        content = message.get("content", "") or ""
+
+        if content.startswith("SWDB|"):
+            try:
+                _, kind, key, encoded = content.split("|", 3)
+                data = decode_json(encoded)
+            except Exception:
+                continue
+
+            if kind == "user":
+                if key not in users:
+                    users[key] = data
+
+            elif kind == "topic":
+                if key not in topics:
+                    topics[key] = data
+
+            elif kind == "comment":
+                if key not in comments:
+                    comments[key] = data
+
+        elif content.startswith("SWFILE|"):
+            try:
+                encoded = content.split("|", 1)[1]
+                data = decode_json(encoded)
+            except Exception:
+                continue
+
+            file_id = data.get("id")
+            attachments = message.get("attachments", [])
+
+            if file_id and file_id not in files and attachments:
+                attachment = attachments[0]
+                data["message_id"] = message.get("id")
+                data["attachment_url"] = attachment.get("url")
+                data["discord_filename"] = attachment.get("filename")
+                files[file_id] = data
+
+    db = {
+        "users": users,
+        "topics": topics,
+        "comments": comments,
+        "files": files
+    }
+
+    CACHE["time"] = now
+    CACHE["db"] = db
+
+    return db
+
+
+def save_user(user):
+    key = user_key(user["email"])
+    content = make_record_message("user", key, user)
+    post_discord_message(content)
+
+
+def save_topic(topic):
+    content = make_record_message("topic", topic["id"], topic)
+    post_discord_message(content)
+
+
+def save_comment(comment):
+    content = make_record_message("comment", comment["id"], comment)
+    post_discord_message(content)
+
+
+def save_file_record(metadata, filename, file_bytes, content_type):
+    content = make_file_message(metadata)
+    return post_discord_file(content, filename, file_bytes, content_type)
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def allowed_file(filename):
+    ext = os.path.splitext(filename.lower())[1]
+    return ext in ALLOWED_EXTENSIONS
+
+
+def size_text(size):
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / 1024:.1f} KB"
+
+
+def current_email():
     return session.get("email")
 
 
-def current_username():
-    email = current_user()
+def current_user():
+    email = current_email()
+
     if not email:
+        return None
+
+    db = load_db()
+    return db["users"].get(user_key(email))
+
+
+def current_username():
+    user = current_user()
+
+    if not user:
         return ""
 
-    users = load_users()
-    user = users.get(email, {})
-    return user.get("username", email)
+    return user.get("username", user.get("email", ""))
 
 
-def get_user_by_username(username):
-    username = username.strip().lower()
-    users = load_users()
+def login_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not current_email():
+            flash("Please login first.", "error")
+            return redirect(url_for("home", view="login"))
 
-    for email, user in users.items():
-        if user.get("username", "").strip().lower() == username:
-            return email, user
+        try:
+            user = current_user()
+        except Exception as e:
+            flash(f"Discord database error: {e}", "error")
+            return redirect(url_for("home", view="login"))
 
-    return None, None
+        if not user:
+            session.clear()
+            flash("Account not found. Please login again.", "error")
+            return redirect(url_for("home", view="login"))
 
+        return func(*args, **kwargs)
 
-def profile_pic_url(filename):
-    if not filename:
-        return ""
-    return url_for("profile_pic", filename=filename)
-
-
-def get_current_profile():
-    email = current_user()
-    users = load_users()
-    user = users.get(email, {})
-
-    username = user.get("username", "")
-    return {
-        "username": username,
-        "email": email,
-        "description": user.get("description", ""),
-        "profile_pic": user.get("profile_pic", ""),
-        "pic_url": profile_pic_url(user.get("profile_pic", "")) if user.get("profile_pic") else "",
-        "initial": username[:1].upper() if username else "?"
-    }
-
-
-def get_public_profiles():
-    users = load_users()
-    profiles = []
-
-    for email, user in users.items():
-        username = user.get("username", email)
-        profiles.append({
-            "username": username,
-            "description": user.get("description", ""),
-            "pic_url": profile_pic_url(user.get("profile_pic", "")) if user.get("profile_pic") else "",
-            "initial": username[:1].upper() if username else "?",
-            "created": user.get("created", 0)
-        })
-
-    return sorted(profiles, key=lambda x: x["username"].lower())
+    return wrapper
 
 
 def valid_username(username):
@@ -195,157 +391,65 @@ def valid_username(username):
     return True
 
 
-def username_exists(username, ignore_email=None):
-    username = username.strip().lower()
-    users = load_users()
+def author_name(email, fallback="unknown"):
+    db = load_db()
+    user = db["users"].get(user_key(email or ""))
 
-    for email, user in users.items():
-        if ignore_email and email == ignore_email:
-            continue
+    if user:
+        return user.get("username", fallback)
 
-        if user.get("username", "").strip().lower() == username:
-            return True
-
-    return False
+    return fallback
 
 
-def update_author_name(old_email, new_username):
-    discussions = load_discussions()
-
-    for topic in discussions:
-        if topic.get("author_email") == old_email:
-            topic["author"] = new_username
-
-        for comment in topic.get("comments", []):
-            if comment.get("author_email") == old_email:
-                comment["author"] = new_username
-
-    save_discussions(discussions)
-
-    meta = load_files_meta()
-
-    for filename, data in meta.items():
-        if data.get("owner_email") == old_email:
-            data["owner"] = new_username
-
-    save_files_meta(meta)
+def public_file(file_data):
+    return {
+        "id": file_data.get("id"),
+        "name": file_data.get("original_name", "file"),
+        "size": size_text(int(file_data.get("size", 0))),
+        "author": author_name(file_data.get("author_email"), file_data.get("author", "unknown")),
+        "created": file_data.get("created", 0)
+    }
 
 
-def allowed_file(filename):
-    ext = os.path.splitext(filename.lower())[1]
-    return ext in ALLOWED_EXTENSIONS
+def public_topic(topic_data):
+    db = load_db()
+    topic_id = topic_data.get("id")
 
+    topic_comments = [
+        c for c in db["comments"].values()
+        if c.get("topic_id") == topic_id
+    ]
 
-def allowed_profile_pic(filename):
-    ext = os.path.splitext(filename.lower())[1]
-    return ext in ALLOWED_PROFILE_EXTENSIONS
+    topic_comments.sort(key=lambda x: int(x.get("created", 0)))
 
-
-def get_files():
-    data = []
-
-    for file in os.listdir(UPLOAD_FOLDER):
-        full = os.path.join(UPLOAD_FOLDER, file)
-
-        if os.path.isfile(full) and allowed_file(file):
-            data.append(file)
-
-    return sorted(data, reverse=True)
-
-
-def file_size_text(filename):
-    path = os.path.join(UPLOAD_FOLDER, filename)
-
-    if not os.path.exists(path):
-        return "0 KB"
-
-    size = os.path.getsize(path)
-
-    if size >= 1024 * 1024:
-        return f"{size / (1024 * 1024):.1f} MB"
-
-    return f"{size / 1024:.1f} KB"
-
-
-def get_file_info(files):
-    meta = load_files_meta()
-    result = {}
-
-    for file in files:
-        data = meta.get(file, {})
-        result[file] = {
-            "size": file_size_text(file),
-            "owner": data.get("owner", "unknown"),
-            "owner_email": data.get("owner_email", ""),
-            "uploaded": data.get("uploaded", 0)
-        }
-
-    return result
-
-
-def add_notification(owner_email, notif_type, message, from_email="", from_username="", extra=None):
-    if not owner_email:
-        return
-
-    if owner_email == from_email:
-        return
-
-    notifications = load_notifications()
-
-    notifications.insert(0, {
-        "id": secrets.token_hex(8),
-        "owner_email": owner_email,
-        "type": notif_type,
-        "message": message,
-        "from_email": from_email,
-        "from_username": from_username,
-        "extra": extra or {},
-        "created": int(time.time())
-    })
-
-    save_notifications(notifications)
-
-
-def get_my_notifications():
-    email = current_user()
-    if not email:
-        return []
-
-    notifications = load_notifications()
-    return [n for n in notifications if n.get("owner_email") == email]
-
-
-def login_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        if not current_user():
-            flash("Please login first.", "error")
-            return redirect(url_for("home", view="login"))
-        return func(*args, **kwargs)
-
-    return wrapper
-
-
-@app.before_request
-def block_guest_actions():
-    allowed_endpoints = {"home", "login", "register", "static"}
-
-    if request.endpoint is None:
-        return
-
-    if request.endpoint in allowed_endpoints:
-        return
-
-    if not current_user():
-        flash("Please login first.", "error")
-        return redirect(url_for("home", view="login"))
+    return {
+        "id": topic_id,
+        "title": topic_data.get("title", ""),
+        "body": topic_data.get("body", ""),
+        "author": author_name(topic_data.get("author_email"), topic_data.get("author", "unknown")),
+        "created": topic_data.get("created", 0),
+        "comments": [
+            {
+                "id": c.get("id"),
+                "body": c.get("body", ""),
+                "author": author_name(c.get("author_email"), c.get("author", "unknown")),
+                "created": c.get("created", 0)
+            }
+            for c in topic_comments
+        ]
+    }
 
 
 def go(view="dashboard", topic_id=None):
     if topic_id:
         return redirect(url_for("home", view=view, id=topic_id))
+
     return redirect(url_for("home", view=view))
 
+
+# ============================================================
+# HTML
+# ============================================================
 
 HTML = """
 <!DOCTYPE html>
@@ -355,17 +459,19 @@ HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
-*{box-sizing:border-box}
+*{
+    box-sizing:border-box;
+}
 
 :root{
     --white:#ffffff;
-    --text:#f8fbff;
-    --muted:rgba(255,255,255,.68);
+    --text:#f7fbff;
+    --muted:rgba(255,255,255,.72);
     --blue:#9fe7ff;
-    --panel:rgba(3,10,18,.78);
+    --dark:#06101d;
+    --panel:rgba(3,13,24,.78);
     --line:rgba(255,255,255,.24);
-    --thin:rgba(255,255,255,.12);
-    --danger:#ff5c5c;
+    --line2:rgba(255,255,255,.12);
 }
 
 body{
@@ -374,13 +480,9 @@ body{
     color:var(--text);
     font-family:Arial,Helvetica,sans-serif;
     background:
-        linear-gradient(rgba(2,7,13,.78), rgba(2,7,13,.90)),
-        radial-gradient(circle at 18% 16%, rgba(100,210,255,.26), transparent 28%),
-        radial-gradient(circle at 86% 82%, rgba(55,120,200,.22), transparent 34%),
-        url("/static/bg.png");
-    background-size:cover;
-    background-position:center;
-    overflow:hidden;
+        linear-gradient(rgba(2,8,16,.72), rgba(2,8,16,.88)),
+        radial-gradient(circle at 18% 18%, rgba(125,215,255,.34), transparent 28%),
+        radial-gradient(circle at 84% 78%, rgba(43,110,190,.32), transparent 35%);
 }
 
 body::before{
@@ -388,238 +490,233 @@ body::before{
     position:fixed;
     inset:0;
     background-image:
-        linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
-    background-size:28px 28px;
-    opacity:.72;
+        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+    background-size:24px 24px;
+    opacity:.65;
     pointer-events:none;
-    z-index:0;
 }
 
-body::after{
-    content:"";
-    position:fixed;
-    inset:16px;
-    border:1px solid rgba(255,255,255,.08);
-    pointer-events:none;
-    z-index:0;
+a{
+    color:var(--blue);
+    text-decoration:none;
+    font-weight:900;
 }
 
-.app{
-    position:relative;
-    z-index:1;
-    height:100vh;
-    display:flex;
-    padding:16px;
-    gap:16px;
+button,
+.file-button{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    background:#071827;
+    color:white;
+    border:1px solid rgba(255,255,255,.28);
+    padding:12px 18px;
+    border-radius:4px;
+    cursor:pointer;
+    transition:.18s ease;
+    font-size:14px;
+    text-decoration:none;
+    font-weight:900;
+}
+
+button:hover,
+.file-button:hover{
+    background:#102b43;
+    border-color:var(--blue);
+    transform:translateY(-1px);
+}
+
+.primary-btn{
+    background:white;
+    color:#06101d;
+    border-color:white;
+}
+
+.primary-btn:hover{
+    background:#e9f8ff;
+    color:#000;
+}
+
+input,
+textarea{
+    background:rgba(0,0,0,.36);
+    color:white;
+    border:1px solid rgba(255,255,255,.34);
+    padding:13px 14px;
+    outline:none;
+    border-radius:4px;
+    font-size:14px;
+}
+
+input::placeholder,
+textarea::placeholder{
+    color:rgba(255,255,255,.62);
+}
+
+input:focus,
+textarea:focus{
+    border-color:var(--blue);
+    background:rgba(0,0,0,.48);
+}
+
+textarea{
+    width:100%;
+    min-height:96px;
+    resize:vertical;
+    margin-top:10px;
 }
 
 .login-only{
-    position:relative;
-    z-index:1;
-    height:100vh;
+    min-height:100vh;
     display:flex;
     justify-content:center;
     align-items:center;
     padding:20px;
+    position:relative;
+    z-index:2;
 }
 
 .login-shell{
-    width:370px;
-    background:rgba(4,14,25,.78);
-    border:1px solid var(--line);
+    width:390px;
+    background:rgba(220,245,255,.20);
+    border:1px solid rgba(255,255,255,.42);
     backdrop-filter:blur(18px);
     -webkit-backdrop-filter:blur(18px);
-    box-shadow:0 28px 90px rgba(0,0,0,.52);
-    border-radius:0;
+    box-shadow:0 28px 80px rgba(0,0,0,.50);
+    border-radius:6px;
     padding:32px;
-    position:relative;
 }
 
-.login-shell::before{
-    content:"";
-    position:absolute;
-    left:0;
-    top:0;
-    right:0;
-    height:1px;
-    background:linear-gradient(90deg, transparent, rgba(159,231,255,.8), transparent);
-}
-
-.login-inner{position:relative;z-index:2}
-
-.login-logo,.title{
-    font-size:11px;
-    letter-spacing:4px;
+.login-logo{
+    font-size:12px;
+    letter-spacing:3px;
     font-weight:900;
     color:white;
-    margin-bottom:30px;
-    text-transform:uppercase;
+    margin-bottom:28px;
 }
 
-.login-logo::after,.title::after{
+.login-logo::after{
     content:"";
     display:block;
-    width:44px;
-    height:1px;
+    width:46px;
+    height:2px;
     background:var(--blue);
     margin-top:12px;
 }
 
 .login-title{
-    font-size:28px;
+    font-size:30px;
     font-weight:900;
     color:white;
     margin-bottom:8px;
     letter-spacing:-1px;
 }
 
-.login-sub,.page-sub{
-    color:var(--muted);
-    font-size:13px;
-    line-height:1.7;
+.login-sub{
+    color:rgba(255,255,255,.76);
+    font-size:14px;
+    line-height:1.6;
     margin-bottom:26px;
 }
 
-.login-input-wrap{position:relative;margin-bottom:16px}
-
-.login-input-wrap input{
+.login-input{
     width:100%;
-    background:rgba(255,255,255,.035);
-    border:none;
-    border-bottom:1px solid rgba(255,255,255,.62);
-    color:white;
-    outline:none;
-    padding:13px 32px 11px 10px;
-    font-size:14px;
-    font-weight:700;
-    border-radius:0;
+    margin-bottom:12px;
 }
 
-.login-input-wrap input::placeholder{color:rgba(255,255,255,.62)}
-.login-input-wrap input:focus{background:rgba(255,255,255,.07);border-bottom-color:var(--blue)}
-
-.login-icon{
-    position:absolute;
-    right:8px;
-    top:12px;
-    color:white;
-    font-size:12px;
-    opacity:.84;
-}
-
-.login-row{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    color:rgba(255,255,255,.70);
-    font-size:12px;
-    margin:6px 0 22px;
-}
-
-.login-row input{accent-color:white}
-
-.btn{
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
+.login-btn{
     width:100%;
-    height:44px;
-    border-radius:0;
-    border:1px solid rgba(255,255,255,.28);
-    cursor:pointer;
-    transition:.16s ease;
-    font-weight:900;
-    font-size:13px;
-    text-decoration:none;
-    letter-spacing:.4px;
+    margin-bottom:12px;
+    height:46px;
 }
 
-.btn-dark{background:#06101d;color:white}
-.btn-dark:hover{background:#0d2235;border-color:var(--blue)}
-.btn-white{background:white;color:#06101d;border-color:white}
-.btn-white:hover{background:#e9f8ff}
-
-.login-line{height:1px;background:rgba(255,255,255,.22);margin:18px 0 14px}
+.login-line{
+    height:1px;
+    background:rgba(255,255,255,.30);
+    margin:18px 0 14px;
+}
 
 .switch-text{
-    color:rgba(255,255,255,.72);
+    color:rgba(255,255,255,.78);
     text-align:center;
     font-size:13px;
     margin-top:18px;
 }
 
-.switch-text a{color:white;font-weight:900;text-decoration:none}
-
-.alert-box,.success-box{
+.alert-box,
+.success-box{
     padding:12px 14px;
     margin-bottom:18px;
-    font-size:13px;
-    border-radius:0;
+    font-size:14px;
+    border-radius:4px;
 }
 
 .alert-box{
-    background:rgba(80,0,0,.48);
+    background:rgba(80,0,0,.55);
     color:#ffdede;
-    border:1px solid rgba(255,90,90,.44);
-    border-left:2px solid #ff5757;
+    border:1px solid rgba(255,90,90,.46);
+    border-left:3px solid #ff5757;
 }
 
 .success-box{
-    background:rgba(0,70,30,.44);
+    background:rgba(0,70,30,.48);
     color:#d6ffe1;
-    border:1px solid rgba(67,232,139,.42);
-    border-left:2px solid #43e88b;
+    border:1px solid rgba(67,232,139,.44);
+    border-left:3px solid #43e88b;
+}
+
+.app{
+    position:relative;
+    z-index:2;
+    min-height:100vh;
+    display:flex;
+    padding:16px;
+    gap:16px;
 }
 
 .side{
     width:260px;
-    padding:26px 20px;
+    padding:28px 20px;
     border:1px solid var(--line);
     background:var(--panel);
     backdrop-filter:blur(18px);
     -webkit-backdrop-filter:blur(18px);
-    box-shadow:0 22px 70px rgba(0,0,0,.44);
+    box-shadow:0 22px 60px rgba(0,0,0,.45);
     display:flex;
     flex-direction:column;
-    border-radius:0;
+    border-radius:6px;
+}
+
+.title{
+    font-size:12px;
+    letter-spacing:3px;
+    color:white;
+    margin-bottom:34px;
+    font-weight:900;
+}
+
+.title::after{
+    content:"";
+    display:block;
+    width:42px;
+    height:2px;
+    background:var(--blue);
+    margin-top:12px;
 }
 
 .user-mini{
-    background:rgba(255,255,255,.045);
-    border:1px solid rgba(255,255,255,.12);
-    border-radius:0;
+    background:rgba(255,255,255,.08);
+    border:1px solid rgba(255,255,255,.14);
+    border-radius:4px;
     padding:12px;
     margin-bottom:24px;
-    display:flex;
-    gap:12px;
-    align-items:center;
-}
-
-.side-avatar,.profile-avatar-img{
-    width:46px;
-    height:46px;
-    object-fit:cover;
-    border:1px solid rgba(255,255,255,.22);
-}
-
-.avatar-fallback,.profile-avatar-fallback{
-    width:46px;
-    height:46px;
-    border:1px solid rgba(255,255,255,.22);
-    background:rgba(255,255,255,.06);
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    font-weight:900;
-    color:white;
 }
 
 .user-mini-name{
     color:white;
     font-weight:900;
     font-size:14px;
-    cursor:pointer;
 }
 
 .user-mini-mail{
@@ -629,283 +726,208 @@ body::after{
     word-break:break-all;
 }
 
-.menu-main{flex:1}
-.menu-bottom{border-top:1px solid var(--thin);padding-top:18px}
-
-.item{
-    cursor:pointer;
-    user-select:none;
-    transition:.16s ease;
-    line-height:2.35;
-    color:rgba(255,255,255,.68);
-    padding:2px 10px;
-    margin-bottom:4px;
-    border-radius:0;
-    font-size:13px;
-    letter-spacing:.7px;
-    border-left:1px solid transparent;
-    text-transform:uppercase;
-    font-weight:800;
+.menu-main{
+    flex:1;
 }
 
-.item:hover,.item.active{
+.menu-bottom{
+    border-top:1px solid var(--line2);
+    padding-top:18px;
+}
+
+.item{
+    display:block;
+    cursor:pointer;
+    user-select:none;
+    transition:.18s ease;
+    line-height:2.35;
+    color:rgba(255,255,255,.76);
+    padding:2px 10px;
+    margin-bottom:4px;
+    border-radius:4px;
+    font-size:14px;
+    letter-spacing:.4px;
+    text-decoration:none;
+    font-weight:400;
+}
+
+.item:hover,
+.item.active{
     color:white;
-    background:rgba(255,255,255,.075);
-    border-left-color:var(--blue);
-    transform:translateX(3px);
+    background:rgba(255,255,255,.13);
+    transform:translateX(4px);
 }
 
 .content{
     flex:1;
     padding:42px;
     overflow-y:auto;
-    transition:opacity .22s ease,transform .22s ease;
     border:1px solid var(--line);
     background:var(--panel);
     backdrop-filter:blur(20px);
     -webkit-backdrop-filter:blur(20px);
-    box-shadow:0 22px 75px rgba(0,0,0,.44);
-    border-radius:0;
+    box-shadow:0 22px 65px rgba(0,0,0,.42);
+    border-radius:6px;
 }
 
-.content.fade{opacity:0;transform:translateY(6px)}
-
-.content::-webkit-scrollbar{width:8px}
-.content::-webkit-scrollbar-track{background:rgba(255,255,255,.04)}
-.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.24);border-radius:0}
-
 .page-title{
-    font-size:32px;
+    font-size:34px;
     font-weight:900;
     margin-bottom:10px;
     color:white;
     letter-spacing:-1px;
 }
 
-.grid{
-    display:grid;
-    grid-template-columns:repeat(3,minmax(0,1fr));
-    gap:14px;
+.page-sub{
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
     margin-bottom:28px;
 }
 
-.card,.file-row,.topic-row,.credit-row,.comment-row,.notification-row{
-    background:rgba(255,255,255,.045);
-    border:1px solid rgba(255,255,255,.14);
-    border-radius:0;
-    padding:15px 17px;
-    transition:.16s ease;
-    position:relative;
-    margin-bottom:14px;
+.grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:16px;
+    margin-bottom:28px;
 }
 
-.card::before,.file-row::before,.topic-row::before,.credit-row::before,.comment-row::before,.notification-row::before{
-    content:"";
-    position:absolute;
-    left:0;
-    top:0;
-    bottom:0;
-    width:1px;
-    background:rgba(159,231,255,.38);
-    opacity:0;
-    transition:.16s ease;
-}
-
-.card:hover,.file-row:hover,.topic-row:hover,.credit-row:hover,.comment-row:hover,.notification-row:hover{
-    background:rgba(255,255,255,.07);
-    border-color:rgba(159,231,255,.38);
-}
-
-.card:hover::before,.file-row:hover::before,.topic-row:hover::before,.credit-row:hover::before,.comment-row:hover::before,.notification-row:hover::before{
-    opacity:1;
+.card{
+    background:rgba(0,0,0,.34);
+    border:1px solid rgba(255,255,255,.20);
+    border-radius:5px;
+    padding:18px;
 }
 
 .card-label{
     color:var(--muted);
-    font-size:11px;
-    letter-spacing:1.8px;
+    font-size:12px;
+    letter-spacing:1.5px;
     text-transform:uppercase;
     margin-bottom:10px;
 }
 
-.card-number{color:white;font-size:29px;font-weight:900}
-.card-text{color:var(--muted);font-size:13px;line-height:1.6;margin-top:8px}
+.card-number{
+    color:white;
+    font-size:30px;
+    font-weight:900;
+}
+
+.card-text,
+.small,
+.meta,
+.topic-meta,
+.comment-meta{
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.7;
+}
 
 .line{
-    border-left:1px solid rgba(255,255,255,.26);
+    border-left:1px solid rgba(255,255,255,.34);
     padding-left:24px;
     max-width:980px;
 }
 
-input,textarea{
-    background:rgba(255,255,255,.045);
-    color:white;
+.file-row,
+.topic-row,
+.credit-row,
+.comment-row{
+    margin-bottom:16px;
+    padding:16px 18px;
+    background:rgba(0,0,0,.34);
     border:1px solid rgba(255,255,255,.22);
-    border-radius:0;
-    padding:13px 14px;
-    outline:none;
-    font-size:14px;
-    backdrop-filter:blur(10px);
+    border-radius:5px;
+    transition:.18s ease;
 }
 
-input::placeholder,textarea::placeholder{color:rgba(255,255,255,.52)}
-input:focus,textarea:focus{border-color:var(--blue);background:rgba(255,255,255,.07)}
-
-textarea{
-    width:100%;
-    min-height:96px;
-    resize:vertical;
-    margin-top:10px;
+.file-row:hover,
+.topic-row:hover,
+.credit-row:hover,
+.comment-row:hover{
+    background:rgba(0,0,0,.46);
+    border-color:rgba(157,228,255,.58);
+    transform:translateY(-1px);
 }
 
-.search-bar{width:330px;margin-bottom:26px}
-
-.file-title,.credit-name,.topic-title{
+.file-title,
+.credit-name,
+.topic-title{
     font-size:15px;
     color:white;
     margin-bottom:7px;
     font-weight:900;
 }
 
-.meta,.topic-meta,.comment-meta,.small{
-    color:var(--muted);
-    font-size:13px;
-    line-height:1.7;
-}
-
-.file-link,.topic-open,.profile-name{
-    color:var(--blue);
-    text-decoration:none;
-    font-size:13px;
-    word-break:break-all;
-    transition:.16s ease;
-    cursor:pointer;
-    font-weight:900;
-}
-
-.file-link:hover,.topic-open:hover,.profile-name:hover{
-    color:white;
-    padding-left:4px;
-}
-
 .form-box{
-    margin-top:30px;
-    border-left:1px solid rgba(255,255,255,.24);
+    margin-top:32px;
+    border-left:1px solid rgba(255,255,255,.34);
     padding-left:24px;
     max-width:740px;
 }
 
-button,.file-button{
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    gap:10px;
-    background:#071827;
-    color:white;
-    border:1px solid rgba(255,255,255,.22);
-    padding:12px 18px;
-    border-radius:0;
-    cursor:pointer;
-    transition:.16s ease;
-    font-size:13px;
-    text-decoration:none;
-    font-weight:900;
-    letter-spacing:.4px;
-    backdrop-filter:blur(10px);
-}
-
-button:hover,.file-button:hover{background:#102b43;border-color:var(--blue)}
-
-.primary-btn{background:white;color:#06101d;border-color:white}
-.primary-btn:hover{background:#e9f8ff;color:#000}
-
-.delete-btn{
-    background:rgba(70,0,0,.35);
-    color:#ffdede;
-    border-color:rgba(255,92,92,.45);
-    padding:9px 13px;
-    margin-left:8px;
-}
-
-.delete-btn:hover{background:rgba(110,0,0,.55);border-color:var(--danger)}
-
-.action-row{
-    margin-top:10px;
-    display:flex;
-    align-items:center;
-    flex-wrap:wrap;
-    gap:8px;
+.search-bar{
+    width:330px;
+    max-width:100%;
+    margin-bottom:26px;
 }
 
 .account-box{
-    width:520px;
-    background:rgba(255,255,255,.045);
-    border:1px solid rgba(255,255,255,.18);
-    border-radius:0;
+    width:430px;
+    max-width:100%;
+    background:rgba(0,0,0,.38);
+    border:1px solid rgba(255,255,255,.28);
+    border-radius:5px;
     padding:28px;
-    box-shadow:0 20px 55px rgba(0,0,0,.28);
+    box-shadow:0 20px 55px rgba(0,0,0,.35);
 }
-
-.login-card-title{
-    font-size:24px;
-    color:white;
-    margin-bottom:8px;
-    font-weight:900;
-    letter-spacing:-.5px;
-}
-
-.login-card-sub{
-    color:var(--muted);
-    font-size:13px;
-    margin-bottom:24px;
-}
-
-.login-btn{width:100%;margin-bottom:12px;height:46px}
-.login-input{width:100%;margin-bottom:12px}
-.selected-file{color:var(--muted);font-size:13px;margin-left:10px}
 
 .account-section{
     margin-top:28px;
     padding-top:22px;
-    border-top:1px solid rgba(255,255,255,.16);
+    border-top:1px solid rgba(255,255,255,.22);
 }
 
 .credit-heading{
     color:white;
-    font-size:12px;
+    font-size:13px;
     letter-spacing:2.4px;
     margin:26px 0 16px;
     font-weight:900;
 }
 
-.credit-heading:first-child{margin-top:0}
-.credit-divider{border-top:1px solid rgba(255,255,255,.22);width:280px;margin:24px 0}
-
-.profile-head{
-    display:flex;
-    align-items:center;
-    gap:20px;
-    margin-bottom:28px;
+.credit-heading:first-child{
+    margin-top:0;
 }
 
-.profile-avatar-img,.profile-avatar-fallback{
-    width:86px;
-    height:86px;
-    font-size:30px;
+.credit-divider{
+    border-top:1px solid rgba(255,255,255,.28);
+    width:280px;
+    margin:24px 0;
 }
 
-.notification-count{
-    color:var(--blue);
-    font-weight:900;
+.selected-file{
+    color:var(--muted);
+    font-size:14px;
+    margin-left:10px;
 }
 
 @media(max-width:900px){
-    body{overflow:auto}
-    .app{height:auto;min-height:100vh;flex-direction:column}
-    .side{width:100%}
-    .content{padding:28px}
-    .grid{grid-template-columns:1fr}
-    .account-box,.search-bar{width:100%}
+    .app{
+        flex-direction:column;
+    }
+
+    .side{
+        width:100%;
+    }
+
+    .content{
+        padding:28px;
+    }
+
+    .grid{
+        grid-template-columns:1fr;
+    }
 }
 </style>
 </head>
@@ -916,83 +938,54 @@ button:hover,.file-button:hover{background:#102b43;border-color:var(--blue)}
 
 <div class="login-only">
     <div class="login-shell">
-        <div class="login-inner">
-            <div class="login-logo">FLOWZNMELHOR</div>
+        <div class="login-logo">FLOWZNMELHOR</div>
 
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                    {% set category = messages[0][0] %}
-                    {% set message = messages[0][1] %}
-                    {% if category == "success" %}
-                        <div class="success-box">{{ message }}</div>
-                    {% else %}
-                        <div class="alert-box">{{ message }}</div>
-                    {% endif %}
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% set category = messages[0][0] %}
+                {% set message = messages[0][1] %}
+                {% if category == "success" %}
+                    <div class="success-box">{{ message }}</div>
+                {% else %}
+                    <div class="alert-box">{{ message }}</div>
                 {% endif %}
-            {% endwith %}
-
-            {% if auth_mode == "register" %}
-                <div class="login-title">Create account</div>
-                <div class="login-sub">Create an account to access the site.</div>
-
-                <form action="/register" method="POST">
-                    <div class="login-input-wrap">
-                        <input name="username" placeholder="Username" required>
-                        <span class="login-icon">◆</span>
-                    </div>
-
-                    <div class="login-input-wrap">
-                        <input name="email" type="email" placeholder="Email" required>
-                        <span class="login-icon">✉</span>
-                    </div>
-
-                    <div class="login-input-wrap">
-                        <input name="password" type="password" placeholder="Password" required>
-                        <span class="login-icon">■</span>
-                    </div>
-
-                    <button class="btn btn-white" type="submit">Create Account</button>
-                </form>
-
-                <div class="login-line"></div>
-
-                <button class="btn btn-dark" onclick="location.href='/?view=login'">Back to Login</button>
-
-                <div class="switch-text">
-                    Already have an account? <a href="/?view=login">Login</a>
-                </div>
-            {% else %}
-                <div class="login-title">Login</div>
-                <div class="login-sub">Login to continue.</div>
-
-                <form action="/login" method="POST">
-                    <div class="login-input-wrap">
-                        <input name="email" type="email" placeholder="Email" required>
-                        <span class="login-icon">✉</span>
-                    </div>
-
-                    <div class="login-input-wrap">
-                        <input name="password" type="password" placeholder="Password" required>
-                        <span class="login-icon">■</span>
-                    </div>
-
-                    <div class="login-row">
-                        <label><input type="checkbox" checked> Remember me</label>
-                        <span>private access</span>
-                    </div>
-
-                    <button class="btn btn-dark" type="submit">Login</button>
-                </form>
-
-                <div class="login-line"></div>
-
-                <button class="btn btn-white" onclick="location.href='/?view=register'">Create Account</button>
-
-                <div class="switch-text">
-                    New here? <a href="/?view=register">Register</a>
-                </div>
             {% endif %}
-        </div>
+        {% endwith %}
+
+        {% if view == "register" %}
+            <div class="login-title">Create account</div>
+            <div class="login-sub">Join the private producer room.</div>
+
+            <form action="/register" method="POST">
+                <input class="login-input" name="username" placeholder="Username" required>
+                <input class="login-input" name="email" type="email" placeholder="Email" required>
+                <input class="login-input" name="password" type="password" placeholder="Password" required>
+                <button class="login-btn primary-btn" type="submit">Create Account</button>
+            </form>
+
+            <div class="login-line"></div>
+            <button class="login-btn" onclick="location.href='/?view=login'">Back to Login</button>
+
+            <div class="switch-text">
+                Already have an account? <a href="/?view=login">Login</a>
+            </div>
+        {% else %}
+            <div class="login-title">Login</div>
+            <div class="login-sub">Private producer space. Data is stored in your Discord database channel.</div>
+
+            <form action="/login" method="POST">
+                <input class="login-input" name="email" type="email" placeholder="Email" required>
+                <input class="login-input" name="password" type="password" placeholder="Password" required>
+                <button class="login-btn" type="submit">Login</button>
+            </form>
+
+            <div class="login-line"></div>
+            <button class="login-btn primary-btn" onclick="location.href='/?view=register'">Create Account</button>
+
+            <div class="switch-text">
+                New producer? <a href="/?view=register">Register</a>
+            </div>
+        {% endif %}
     </div>
 </div>
 
@@ -1003,36 +996,27 @@ button:hover,.file-button:hover{background:#102b43;border-color:var(--blue)}
         <div class="title">FLOWZNMELHOR</div>
 
         <div class="user-mini">
-            {% if current_profile.pic_url %}
-                <img class="side-avatar" src="{{ current_profile.pic_url }}">
-            {% else %}
-                <div class="avatar-fallback">{{ current_profile.initial }}</div>
-            {% endif %}
-            <div>
-                <div class="user-mini-name" onclick="openProfile('{{ username }}')">{{ username }}</div>
-                <div class="user-mini-mail">{{ user_email }}</div>
-            </div>
+            <div class="user-mini-name">{{ username }}</div>
+            <div class="user-mini-mail">{{ user_email }}</div>
         </div>
 
         <div class="menu-main">
-            <div class="item" id="menuDashboard" onclick="showDashboard(this)">HOME</div>
-            <div class="item" id="menuFiles" onclick="showFiles(this)">FILES</div>
-            <div class="item" id="menuDiscussion" onclick="showDiscussion(this)">DISCUSSION</div>
-            <div class="item" id="menuNotifications" onclick="showNotifications(this)">NOTIFICATIONS <span class="notification-count">{{ notification_count }}</span></div>
+            <a class="item {% if view == 'dashboard' %}active{% endif %}" href="/?view=dashboard">home</a>
+            <a class="item {% if view == 'files' %}active{% endif %}" href="/?view=files">files</a>
+            <a class="item {% if view == 'discussion' or view == 'topic' %}active{% endif %}" href="/?view=discussion">discussion</a>
         </div>
 
         <div class="menu-bottom">
-            <div class="item" id="menuAccount" onclick="showAccount(this)">ACCOUNT</div>
-            <div class="item" id="menuCredits" onclick="showCredits(this)">CREDITS</div>
+            <a class="item {% if view == 'account' %}active{% endif %}" href="/?view=account">account</a>
+            <a class="item {% if view == 'credits' %}active{% endif %}" href="/?view=credits">credits</a>
         </div>
     </div>
 
-    <div class="content" id="content">
+    <div class="content">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% set category = messages[0][0] %}
                 {% set message = messages[0][1] %}
-
                 {% if category == "success" %}
                     <div class="success-box">{{ message }}</div>
                 {% else %}
@@ -1041,678 +1025,275 @@ button:hover,.file-button:hover{background:#102b43;border-color:var(--blue)}
             {% endif %}
         {% endwith %}
 
-        <div class="page-title">loading</div>
-        <div class="small">opening site.</div>
+        {% if view == "dashboard" %}
+            <div class="page-title">producer room</div>
+            <div class="page-sub">
+                Upload ZIP packs, share MP3 previews, start discussions and build a private funk producer space.
+            </div>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="card-label">uploaded files</div>
+                    <div class="card-number">{{ files|length }}</div>
+                    <div class="card-text">ZIP packs and MP3 previews.</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-label">topics</div>
+                    <div class="card-number">{{ topics|length }}</div>
+                    <div class="card-text">Producer questions and ideas.</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-label">comments</div>
+                    <div class="card-number">{{ total_comments }}</div>
+                    <div class="card-text">Community replies and feedback.</div>
+                </div>
+            </div>
+
+            <div class="line">
+                <div class="topic-title">recent files</div>
+                <br>
+
+                {% if files|length == 0 %}
+                    <div class="small">No files yet.</div>
+                {% endif %}
+
+                {% for file in files[:3] %}
+                    <div class="file-row">
+                        <div class="file-title">{{ file.name }}</div>
+                        <div class="meta">by {{ file.author }} · {{ file.size }}</div>
+                        <a href="/download/{{ file.id }}">download</a>
+                    </div>
+                {% endfor %}
+
+                <br>
+                <div class="topic-title">recent discussions</div>
+                <br>
+
+                {% if topics|length == 0 %}
+                    <div class="small">No topics yet.</div>
+                {% endif %}
+
+                {% for topic in topics[:3] %}
+                    <div class="topic-row">
+                        <div class="topic-title">{{ topic.title }}</div>
+                        <div class="topic-meta">by {{ topic.author }} · {{ topic.comments|length }} comments</div>
+                        <div class="small">{{ topic.body[:160] }}{% if topic.body|length > 160 %}...{% endif %}</div>
+                        <br>
+                        <a href="/?view=topic&id={{ topic.id }}">open discussion</a>
+                    </div>
+                {% endfor %}
+            </div>
+
+            <div class="form-box">
+                <button onclick="location.href='/?view=files'">upload file</button>
+                <button onclick="location.href='/?view=discussion'">start discussion</button>
+            </div>
+        {% endif %}
+
+        {% if view == "files" %}
+            <div class="page-title">files</div>
+            <div class="page-sub">Upload ZIP packs or MP3 previews. Files are stored as Discord attachments.</div>
+
+            <input id="searchInput" class="search-bar" placeholder="search files" oninput="filterRows('searchInput', '.file-row')">
+
+            <div class="line">
+                {% if files|length == 0 %}
+                    <div class="small">No files yet.</div>
+                {% endif %}
+
+                {% for file in files %}
+                    <div class="file-row" data-search="{{ file.name|lower }} {{ file.author|lower }}">
+                        <div class="file-title">{{ file.name }}</div>
+                        <div class="meta">by {{ file.author }} · {{ file.size }}</div>
+                        <a href="/download/{{ file.id }}">download</a>
+                    </div>
+                {% endfor %}
+            </div>
+
+            <div class="form-box">
+                <form action="/upload" method="POST" enctype="multipart/form-data">
+                    <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3" required hidden>
+                    <label for="fileInput" class="file-button">select zip or mp3</label>
+                    <span id="fileName" class="selected-file">no file selected</span>
+                    <br><br>
+                    <button class="primary-btn" type="submit">upload file</button>
+                </form>
+                <p class="small">Allowed: ZIP and MP3 only. Max size: {{ max_file_mb }} MB.</p>
+            </div>
+        {% endif %}
+
+        {% if view == "discussion" %}
+            <div class="page-title">discussion</div>
+            <div class="page-sub">Ask for feedback, share FL Studio tricks, post beat ideas or start producer challenges.</div>
+
+            <input id="discussionSearchInput" class="search-bar" placeholder="search discussions" oninput="filterRows('discussionSearchInput', '.topic-row')">
+
+            <div class="line">
+                {% if topics|length == 0 %}
+                    <div class="small">No topics yet.</div>
+                {% endif %}
+
+                {% for topic in topics %}
+                    <div class="topic-row" data-search="{{ topic.title|lower }} {{ topic.author|lower }} {{ topic.body|lower }}">
+                        <div class="topic-title">{{ topic.title }}</div>
+                        <div class="topic-meta">by {{ topic.author }} · {{ topic.comments|length }} comments</div>
+                        <div class="small">{{ topic.body[:160] }}{% if topic.body|length > 160 %}...{% endif %}</div>
+                        <br>
+                        <a href="/?view=topic&id={{ topic.id }}">open discussion</a>
+                    </div>
+                {% endfor %}
+            </div>
+
+            <div class="form-box">
+                <form action="/topic" method="POST">
+                    <input name="title" placeholder="topic title" required style="width:100%;">
+                    <textarea name="body" placeholder="write topic text" required></textarea>
+                    <br><br>
+                    <button class="primary-btn" type="submit">add topic</button>
+                </form>
+            </div>
+        {% endif %}
+
+        {% if view == "topic" %}
+            {% if selected_topic %}
+                <div class="page-title">{{ selected_topic.title }}</div>
+                <div class="page-sub">by {{ selected_topic.author }}</div>
+
+                <button onclick="location.href='/?view=discussion'">back to discussion</button>
+                <br><br>
+
+                <div class="line">
+                    <div class="small">{{ selected_topic.body }}</div>
+                    <br><br>
+
+                    <div class="topic-title">comments</div>
+                    <br>
+
+                    {% if selected_topic.comments|length == 0 %}
+                        <div class="small">No comments yet.</div>
+                    {% endif %}
+
+                    {% for comment in selected_topic.comments %}
+                        <div class="comment-row">
+                            <div class="comment-meta">{{ comment.author }}</div>
+                            <div class="small">{{ comment.body }}</div>
+                        </div>
+                    {% endfor %}
+                </div>
+
+                <div class="form-box">
+                    <form action="/comment/{{ selected_topic.id }}" method="POST">
+                        <textarea name="body" placeholder="write comment" required></textarea>
+                        <br><br>
+                        <button class="primary-btn" type="submit">add comment</button>
+                    </form>
+                </div>
+            {% else %}
+                <div class="page-title">topic not found</div>
+                <div class="page-sub">The discussion topic does not exist.</div>
+                <button onclick="location.href='/?view=discussion'">back to discussion</button>
+            {% endif %}
+        {% endif %}
+
+        {% if view == "account" %}
+            <div class="page-title">account</div>
+            <div class="page-sub">Edit your username, password or logout.</div>
+
+            <div class="line">
+                <div class="account-box">
+                    <div class="topic-title">{{ username }}</div>
+                    <div class="small">{{ user_email }}</div>
+
+                    <div class="account-section">
+                        <div class="topic-title">change username</div>
+                        <br>
+                        <form action="/change-username" method="POST">
+                            <input class="login-input" name="new_username" placeholder="new username" required>
+                            <button class="login-btn primary-btn" type="submit">save username</button>
+                        </form>
+                    </div>
+
+                    <div class="account-section">
+                        <div class="topic-title">change password</div>
+                        <br>
+                        <form action="/change-password" method="POST">
+                            <input class="login-input" name="old_password" type="password" placeholder="old password" required>
+                            <input class="login-input" name="new_password" type="password" placeholder="new password" required>
+                            <button class="login-btn primary-btn" type="submit">save password</button>
+                        </form>
+                    </div>
+
+                    <div class="account-section">
+                        <form action="/logout" method="POST">
+                            <button class="login-btn" type="submit">logout</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        {% endif %}
+
+        {% if view == "credits" %}
+            <div class="page-title">credits</div>
+            <div class="page-sub">People behind the site.</div>
+
+            <div class="line">
+                <div class="credit-heading">OWNERS</div>
+                {% for person in credits["OWNERS"] %}
+                    <div class="credit-row">
+                        <div class="credit-name">{{ person }}</div>
+                    </div>
+                {% endfor %}
+
+                <div class="credit-divider"></div>
+
+                <div class="credit-heading">MEMBERS</div>
+                {% for person in credits["MEMBERS"] %}
+                    <div class="credit-row">
+                        <div class="credit-name">{{ person }}</div>
+                    </div>
+                {% endfor %}
+
+                <div class="credit-divider"></div>
+
+                <div class="credit-heading">WEBSITE MADE BY</div>
+                {% for person in credits["WEBSITE MADE BY"] %}
+                    <div class="credit-row">
+                        <div class="credit-name">{{ person }}</div>
+                    </div>
+                {% endfor %}
+            </div>
+        {% endif %}
     </div>
 </div>
 
 {% endif %}
 
 <script>
-const files = {{ files|tojson }};
-const fileInfo = {{ file_info|tojson }};
-const credits = {{ credits|tojson }};
-const discussions = {{ discussions|tojson }};
-const profiles = {{ profiles|tojson }};
-const notifications = {{ notifications|tojson }};
-const userEmail = {{ user_email|tojson }};
-const username = {{ username|tojson }};
-const startView = {{ start_view|tojson }};
-const startTopicId = {{ start_topic_id|tojson }};
-const startProfileUsername = {{ start_profile_username|tojson }};
+function filterRows(inputId, rowSelector){
+    const input = document.getElementById(inputId);
 
-function clickEffect(el){
-    if(!el) return;
-    el.classList.remove("clicked");
-    void el.offsetWidth;
-    el.classList.add("clicked");
-}
-
-function fadeChange(html){
-    const content=document.getElementById("content");
-    if(!content) return;
-
-    content.classList.add("fade");
-
-    setTimeout(()=>{
-        content.innerHTML=html;
-        content.classList.remove("fade");
-        bindFileInput();
-        bindProfilePicInput();
-    },140);
-}
-
-function bindFileInput(){
-    const input=document.getElementById("fileInput");
-    const name=document.getElementById("fileName");
-
-    if(!input || !name) return;
-
-    input.addEventListener("change",()=>{
-        name.textContent=input.files.length ? input.files[0].name : "no file selected";
-    });
-}
-
-function bindProfilePicInput(){
-    const input=document.getElementById("profilePicInput");
-    const name=document.getElementById("profilePicName");
-
-    if(!input || !name) return;
-
-    input.addEventListener("change",()=>{
-        name.textContent=input.files.length ? input.files[0].name : "no picture selected";
-    });
-}
-
-function clearActive(){
-    document.querySelectorAll(".item").forEach(i=>i.classList.remove("active"));
-}
-
-function setUrl(view, topicId=null, profileUsername=null){
-    if(view === "topic" && topicId){
-        window.history.replaceState(null, "", "/?view=topic&id=" + encodeURIComponent(topicId));
-    }else if(view === "profile" && profileUsername){
-        window.history.replaceState(null, "", "/?view=profile&u=" + encodeURIComponent(profileUsername));
-    }else{
-        window.history.replaceState(null, "", "/?view=" + encodeURIComponent(view));
-    }
-}
-
-function openProfile(name){
-    if(!name || name === "unknown") return;
-    window.location.href = "/profile/" + encodeURIComponent(name);
-}
-
-function profileSpan(name){
-    if(!name || name === "unknown") return escapeHtml(name || "unknown");
-    return `<span class="profile-name" onclick="openProfile('${escapeAttr(name)}')">${escapeHtml(name)}</span>`;
-}
-
-function avatarHtml(profile){
-    if(profile.pic_url){
-        return `<img class="profile-avatar-img" src="${escapeAttr(profile.pic_url)}">`;
-    }
-    return `<div class="profile-avatar-fallback">${escapeHtml(profile.initial || "?")}</div>`;
-}
-
-function timeText(seconds){
-    if(!seconds) return "";
-    const d = new Date(seconds * 1000);
-    return d.toLocaleString();
-}
-
-function showDashboard(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
-
-    setUrl("dashboard");
-
-    const totalComments = discussions.reduce((sum, t)=>sum + t.comments.length, 0);
-    const recentTopics = discussions.slice(0,3);
-    const recentFiles = files.slice(0,3);
-
-    let html=`
-        <div class="page-title">home</div>
-        <div class="page-sub">Files, discussions, account and credits.</div>
-
-        <div class="grid">
-            <div class="card">
-                <div class="card-label">files</div>
-                <div class="card-number">${files.length}</div>
-                <div class="card-text">Uploaded ZIP and MP3 files.</div>
-            </div>
-
-            <div class="card">
-                <div class="card-label">discussions</div>
-                <div class="card-number">${discussions.length}</div>
-                <div class="card-text">Created discussion posts.</div>
-            </div>
-
-            <div class="card">
-                <div class="card-label">comments</div>
-                <div class="card-number">${totalComments}</div>
-                <div class="card-text">Replies inside discussions.</div>
-            </div>
-        </div>
-
-        <div class="line">
-            <div class="topic-title">recent activity</div>
-            <br>
-    `;
-
-    if(recentTopics.length === 0 && recentFiles.length === 0){
-        html += `<div class="small">No activity yet.</div>`;
-    }
-
-    recentFiles.forEach(file=>{
-        const info = fileInfo[file] || {};
-        html += `
-            <div class="file-row">
-                <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">file · ${escapeHtml(info.size || "")} · by ${profileSpan(info.owner || "unknown")}</div>
-                <div class="action-row">
-                    <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
-                    ${info.owner_email === userEmail ? deleteFileForm(file) : ""}
-                </div>
-            </div>
-        `;
-    });
-
-    recentTopics.forEach(topic=>{
-        html += `
-            <div class="topic-row">
-                <div class="topic-title">${escapeHtml(topic.title)}</div>
-                <div class="topic-meta">by ${profileSpan(topic.author)} · ${topic.comments.length} comments</div>
-                <div class="action-row">
-                    <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
-                    ${topic.author_email === userEmail ? deleteTopicForm(topic.id) : ""}
-                </div>
-            </div>
-        `;
-    });
-
-    html += `</div>`;
-
-    fadeChange(html);
-}
-
-function showFiles(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
-
-    setUrl("files");
-
-    let html=`
-        <div class="page-title">files</div>
-        <div class="page-sub">Upload ZIP or MP3 files.</div>
-
-        <input id="searchInput" class="search-bar" placeholder="search files" oninput="filterFiles()">
-
-        <div class="line">
-    `;
-
-    if(files.length===0){
-        html+=`<div class="small">no files yet.</div>`;
-    }
-
-    files.forEach(file=>{
-        const info = fileInfo[file] || {};
-
-        html+=`
-            <div class="file-row" data-name="${escapeAttr(file.toLowerCase())}">
-                <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">${escapeHtml(info.size || "")} · by ${profileSpan(info.owner || "unknown")}</div>
-                <div class="action-row">
-                    <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
-                    ${info.owner_email === userEmail ? deleteFileForm(file) : ""}
-                </div>
-            </div>
-        `;
-    });
-
-    html+=`</div>`;
-
-    html+=`
-        <div class="form-box">
-            <form action="/upload" method="POST" enctype="multipart/form-data">
-                <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3" required hidden>
-                <label for="fileInput" class="file-button">select file</label>
-                <span id="fileName" class="selected-file">no file selected</span>
-                <br><br>
-                <button class="primary-btn" type="submit">upload</button>
-            </form>
-            <p class="small">allowed: zip and mp3 only.</p>
-        </div>
-    `;
-
-    fadeChange(html);
-}
-
-function filterFiles(){
-    const search=document.getElementById("searchInput").value.toLowerCase();
-
-    document.querySelectorAll(".file-row").forEach(row=>{
-        const name=row.getAttribute("data-name");
-        row.style.display=name.includes(search) ? "block" : "none";
-    });
-}
-
-function showDiscussion(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
-
-    setUrl("discussion");
-
-    let html=`
-        <div class="page-title">discussion</div>
-        <div class="page-sub">Create or reply to discussion posts.</div>
-
-        <input id="discussionSearchInput" class="search-bar" placeholder="search discussions" oninput="filterDiscussions()">
-
-        <div class="line">
-    `;
-
-    if(discussions.length===0){
-        html+=`<div class="small">no posts yet.</div>`;
-    }
-
-    discussions.forEach(topic=>{
-        const searchable=(topic.title + " " + topic.author + " " + topic.body).toLowerCase();
-
-        html+=`
-            <div class="topic-row" data-name="${escapeAttr(searchable)}">
-                <div class="topic-title">${escapeHtml(topic.title)}</div>
-                <div class="topic-meta">by ${profileSpan(topic.author)} · ${topic.comments.length} comments</div>
-                <div class="small">${escapeHtml(topic.body).slice(0,140)}${topic.body.length > 140 ? "..." : ""}</div>
-                <div class="action-row">
-                    <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
-                    ${topic.author_email === userEmail ? deleteTopicForm(topic.id) : ""}
-                </div>
-            </div>
-        `;
-    });
-
-    html+=`</div>`;
-
-    html+=`
-        <div class="form-box">
-            <form action="/topic" method="POST">
-                <input name="title" placeholder="post title" required style="width:100%;">
-                <textarea name="body" placeholder="write post" required></textarea>
-                <br><br>
-                <button class="primary-btn" type="submit">post</button>
-            </form>
-        </div>
-    `;
-
-    fadeChange(html);
-}
-
-function filterDiscussions(){
-    const search=document.getElementById("discussionSearchInput").value.toLowerCase();
-
-    document.querySelectorAll(".topic-row").forEach(row=>{
-        const name=row.getAttribute("data-name");
-        row.style.display=name.includes(search) ? "block" : "none";
-    });
-}
-
-function openTopic(topicId){
-    const topic=discussions.find(t=>t.id===topicId);
-    if(!topic) return;
-
-    setUrl("topic", topicId);
-
-    clearActive();
-    const discussionButton=document.getElementById("menuDiscussion");
-    if(discussionButton) discussionButton.classList.add("active");
-
-    let html=`
-        <div class="page-title">${escapeHtml(topic.title)}</div>
-        <div class="page-sub">by ${profileSpan(topic.author)}</div>
-
-        <div class="action-row">
-            <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">back</button>
-            ${topic.author_email === userEmail ? deleteTopicForm(topic.id) : ""}
-        </div>
-
-        <br>
-
-        <div class="line">
-            <div class="small">${escapeHtml(topic.body).replaceAll("\\n","<br>")}</div>
-            <br><br>
-            <div class="topic-title">comments</div>
-    `;
-
-    if(topic.comments.length===0){
-        html+=`<div class="small">no comments yet.</div>`;
-    }
-
-    topic.comments.forEach(comment=>{
-        html+=`
-            <div class="comment-row">
-                <div class="comment-meta">${profileSpan(comment.author)}</div>
-                <div class="small">${escapeHtml(comment.body).replaceAll("\\n","<br>")}</div>
-            </div>
-        `;
-    });
-
-    html+=`</div>`;
-
-    html+=`
-        <div class="form-box">
-            <form action="/comment/${topic.id}" method="POST">
-                <textarea name="body" placeholder="write comment" required></textarea>
-                <br><br>
-                <button class="primary-btn" type="submit">comment</button>
-            </form>
-        </div>
-    `;
-
-    fadeChange(html);
-}
-
-function showProfileByUsername(profileUsername){
-    const profile = profiles.find(p => p.username.toLowerCase() === String(profileUsername).toLowerCase());
-
-    clearActive();
-
-    if(!profile){
-        fadeChange(`
-            <div class="page-title">profile not found</div>
-            <div class="page-sub">This user does not exist.</div>
-        `);
+    if(!input){
         return;
     }
 
-    setUrl("profile", null, profile.username);
+    const search = input.value.toLowerCase();
 
-    const userFiles = files.filter(file => {
-        const info = fileInfo[file] || {};
-        return info.owner === profile.username;
+    document.querySelectorAll(rowSelector).forEach(row=>{
+        const text = row.getAttribute("data-search") || row.innerText.toLowerCase();
+        row.style.display = text.includes(search) ? "block" : "none";
     });
-
-    const userTopics = discussions.filter(topic => topic.author === profile.username);
-
-    let userComments = 0;
-    discussions.forEach(topic=>{
-        topic.comments.forEach(comment=>{
-            if(comment.author === profile.username) userComments++;
-        });
-    });
-
-    let html = `
-        <div class="profile-head">
-            ${avatarHtml(profile)}
-            <div>
-                <div class="page-title">${escapeHtml(profile.username)}</div>
-                <div class="page-sub">${profile.description ? escapeHtml(profile.description).replaceAll("\\n","<br>") : "No description."}</div>
-            </div>
-        </div>
-
-        <div class="grid">
-            <div class="card">
-                <div class="card-label">files</div>
-                <div class="card-number">${userFiles.length}</div>
-                <div class="card-text">Uploaded files.</div>
-            </div>
-
-            <div class="card">
-                <div class="card-label">posts</div>
-                <div class="card-number">${userTopics.length}</div>
-                <div class="card-text">Created posts.</div>
-            </div>
-
-            <div class="card">
-                <div class="card-label">comments</div>
-                <div class="card-number">${userComments}</div>
-                <div class="card-text">Written comments.</div>
-            </div>
-        </div>
-
-        <div class="line">
-            <div class="topic-title">files</div>
-            <br>
-    `;
-
-    if(userFiles.length === 0){
-        html += `<div class="small">No files.</div>`;
-    }
-
-    userFiles.forEach(file=>{
-        const info = fileInfo[file] || {};
-        html += `
-            <div class="file-row">
-                <div class="file-title">${escapeHtml(file)}</div>
-                <div class="meta">${escapeHtml(info.size || "")}</div>
-                <div class="action-row">
-                    <a class="file-link" href="/download/${encodeURIComponent(file)}" target="_blank">download</a>
-                </div>
-            </div>
-        `;
-    });
-
-    html += `
-            <br>
-            <div class="topic-title">posts</div>
-            <br>
-    `;
-
-    if(userTopics.length === 0){
-        html += `<div class="small">No posts.</div>`;
-    }
-
-    userTopics.forEach(topic=>{
-        html += `
-            <div class="topic-row">
-                <div class="topic-title">${escapeHtml(topic.title)}</div>
-                <div class="topic-meta">${topic.comments.length} comments</div>
-                <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
-            </div>
-        `;
-    });
-
-    html += `</div>`;
-
-    fadeChange(html);
 }
 
-function showNotifications(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
+const fileInput = document.getElementById("fileInput");
+const fileName = document.getElementById("fileName");
 
-    setUrl("notifications");
-
-    let html = `
-        <div class="page-title">notifications</div>
-        <div class="page-sub">Profile views, comments, downloads and account activity.</div>
-
-        <div class="line">
-    `;
-
-    if(notifications.length === 0){
-        html += `<div class="small">No notifications yet.</div>`;
-    }
-
-    notifications.forEach(n=>{
-        html += `
-            <div class="notification-row">
-                <div class="topic-title">${escapeHtml(n.message)}</div>
-                <div class="meta">${escapeHtml(timeText(n.created))}</div>
-            </div>
-        `;
+if(fileInput && fileName){
+    fileInput.addEventListener("change", ()=>{
+        fileName.textContent = fileInput.files.length ? fileInput.files[0].name : "no file selected";
     });
-
-    html += `
-        </div>
-
-        <div class="form-box">
-            <form action="/clear-notifications" method="POST" onsubmit="return confirm('Clear notifications?');">
-                <button class="delete-btn" type="submit">clear notifications</button>
-            </form>
-        </div>
-    `;
-
-    fadeChange(html);
 }
-
-function showAccount(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
-
-    setUrl("account");
-
-    const myProfile = profiles.find(p => p.username === username) || {};
-
-    let html=`
-        <div class="page-title">account</div>
-        <div class="page-sub">Edit your account.</div>
-
-        <div class="line">
-            <div class="account-box">
-                <div class="profile-head">
-                    ${avatarHtml(myProfile)}
-                    <div>
-                        <div class="login-card-title">${escapeHtml(username)}</div>
-                        <div class="login-card-sub">${escapeHtml(userEmail)}</div>
-                    </div>
-                </div>
-
-                <div class="account-section">
-                    <div class="topic-title">profile</div>
-                    <br>
-                    <form action="/update-profile" method="POST" enctype="multipart/form-data">
-                        <textarea name="description" placeholder="profile description">${escapeHtml(myProfile.description || "")}</textarea>
-                        <br><br>
-                        <input id="profilePicInput" type="file" name="profile_pic" accept=".png,.jpg,.jpeg,.webp" hidden>
-                        <label for="profilePicInput" class="file-button">select profile picture</label>
-                        <span id="profilePicName" class="selected-file">no picture selected</span>
-                        <br><br>
-                        <button class="login-btn primary-btn" type="submit">save profile</button>
-                    </form>
-                </div>
-
-                <div class="account-section">
-                    <div class="topic-title">change username</div>
-                    <br>
-                    <form action="/change-username" method="POST">
-                        <input class="login-input" name="new_username" placeholder="new username" required>
-                        <button class="login-btn primary-btn" type="submit">save username</button>
-                    </form>
-                </div>
-
-                <div class="account-section">
-                    <div class="topic-title">change password</div>
-                    <br>
-                    <form action="/change-password" method="POST">
-                        <input class="login-input" name="old_password" type="password" placeholder="old password" required>
-                        <input class="login-input" name="new_password" type="password" placeholder="new password" required>
-                        <button class="login-btn primary-btn" type="submit">save password</button>
-                    </form>
-                </div>
-
-                <div class="account-section">
-                    <form action="/logout" method="POST">
-                        <button class="login-btn" type="submit">logout</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    `;
-
-    fadeChange(html);
-}
-
-function showCredits(button){
-    clickEffect(button);
-    clearActive();
-    if(button) button.classList.add("active");
-
-    setUrl("credits");
-
-    let html=`
-        <div class="page-title">credits</div>
-        <div class="page-sub">Site credits.</div>
-
-        <div class="line">
-            <div class="credit-heading">OWNERS</div>
-    `;
-
-    credits["OWNERS"].forEach(person=>{
-        html+=`
-            <div class="credit-row">
-                <div class="credit-name">${escapeHtml(person)}</div>
-            </div>
-        `;
-    });
-
-    html+=`
-        <div class="credit-divider"></div>
-        <div class="credit-heading">MEMBERS</div>
-    `;
-
-    credits["MEMBERS"].forEach(person=>{
-        html+=`
-            <div class="credit-row">
-                <div class="credit-name">${escapeHtml(person)}</div>
-            </div>
-        `;
-    });
-
-    html+=`
-        <div class="credit-divider"></div>
-        <div class="credit-heading">WEBSITE MADE BY</div>
-    `;
-
-    credits["WEBSITE MADE BY"].forEach(person=>{
-        html+=`
-            <div class="credit-row">
-                <div class="credit-name">${escapeHtml(person)}</div>
-            </div>
-        `;
-    });
-
-    html+=`</div>`;
-    fadeChange(html);
-}
-
-function deleteTopicForm(topicId){
-    return `
-        <form action="/delete-topic/${encodeURIComponent(topicId)}" method="POST" onsubmit="return confirm('Delete this post?');">
-            <button class="delete-btn" type="submit">delete post</button>
-        </form>
-    `;
-}
-
-function deleteFileForm(filename){
-    return `
-        <form action="/delete-file/${encodeURIComponent(filename)}" method="POST" onsubmit="return confirm('Delete this file?');">
-            <button class="delete-btn" type="submit">delete file</button>
-        </form>
-    `;
-}
-
-function escapeHtml(text){
-    return String(text)
-        .replaceAll("&","&amp;")
-        .replaceAll("<","&lt;")
-        .replaceAll(">","&gt;")
-        .replaceAll('"',"&quot;")
-        .replaceAll("'","&#039;");
-}
-
-function escapeAttr(text){
-    return escapeHtml(text).replaceAll('"',"&quot;");
-}
-
-window.addEventListener("load", ()=>{
-    if(!userEmail) return;
-
-    setTimeout(()=>{
-        if(startView === "files"){
-            showFiles(document.getElementById("menuFiles"));
-        }else if(startView === "discussion"){
-            showDiscussion(document.getElementById("menuDiscussion"));
-        }else if(startView === "topic" && startTopicId){
-            openTopic(startTopicId);
-        }else if(startView === "profile" && startProfileUsername){
-            showProfileByUsername(startProfileUsername);
-        }else if(startView === "notifications"){
-            showNotifications(document.getElementById("menuNotifications"));
-        }else if(startView === "account"){
-            showAccount(document.getElementById("menuAccount"));
-        }else if(startView === "credits"){
-            showCredits(document.getElementById("menuCredits"));
-        }else{
-            showDashboard(document.getElementById("menuDashboard"));
-        }
-    },100);
-});
 </script>
 
 </body>
@@ -1720,85 +1301,106 @@ window.addEventListener("load", ()=>{
 """
 
 
+# ============================================================
+# ROUTES
+# ============================================================
+
 @app.route("/")
 def home():
-    logged_in = bool(current_user())
-    requested_view = request.args.get("view", "")
-    requested_topic = request.args.get("id", "")
-    requested_profile = request.args.get("u", "")
+    view = request.args.get("view", "dashboard")
+    topic_id = request.args.get("id", "")
+
+    logged_in = bool(current_email())
 
     if not logged_in:
-        auth_mode = "register" if requested_view == "register" else "login"
-        requested_view = "login"
-        requested_topic = ""
-        requested_profile = ""
-    else:
-        auth_mode = ""
-        if requested_view in ["login", "register", ""]:
-            requested_view = "dashboard"
+        if view != "register":
+            view = "login"
 
-    files = get_files() if logged_in else []
-    notifications = get_my_notifications() if logged_in else []
+        return render_template_string(
+            HTML,
+            view=view,
+            user_email=None,
+            username="",
+            files=[],
+            topics=[],
+            selected_topic=None,
+            total_comments=0,
+            credits=CREDITS,
+            max_file_mb=MAX_FILE_SIZE // (1024 * 1024)
+        )
+
+    allowed_views = {"dashboard", "files", "discussion", "topic", "account", "credits"}
+
+    if view not in allowed_views:
+        view = "dashboard"
+
+    try:
+        user = current_user()
+        db = load_db()
+    except Exception as e:
+        flash(f"Discord database error: {e}", "error")
+        return render_template_string(
+            HTML,
+            view="dashboard",
+            user_email=current_email(),
+            username=current_email(),
+            files=[],
+            topics=[],
+            selected_topic=None,
+            total_comments=0,
+            credits=CREDITS,
+            max_file_mb=MAX_FILE_SIZE // (1024 * 1024)
+        )
+
+    if not user:
+        session.clear()
+        flash("Account not found. Please login again.", "error")
+        return redirect(url_for("home", view="login"))
+
+    files = [public_file(f) for f in db["files"].values()]
+    files.sort(key=lambda x: int(x.get("created", 0)), reverse=True)
+
+    topics = [public_topic(t) for t in db["topics"].values()]
+    topics.sort(key=lambda x: int(x.get("created", 0)), reverse=True)
+
+    selected_topic = None
+
+    if view == "topic" and topic_id:
+        topic_data = db["topics"].get(topic_id)
+
+        if topic_data:
+            selected_topic = public_topic(topic_data)
+
+    total_comments = len(db["comments"])
 
     return render_template_string(
         HTML,
+        view=view,
+        user_email=user.get("email"),
+        username=user.get("username"),
         files=files,
-        file_info=get_file_info(files),
+        topics=topics,
+        selected_topic=selected_topic,
+        total_comments=total_comments,
         credits=CREDITS,
-        discussions=load_discussions() if logged_in else [],
-        profiles=get_public_profiles() if logged_in else [],
-        notifications=notifications,
-        notification_count=len(notifications),
-        user_email=current_user(),
-        username=current_username(),
-        current_profile=get_current_profile() if logged_in else {},
-        start_view=requested_view,
-        start_topic_id=requested_topic,
-        start_profile_username=requested_profile,
-        auth_mode=auth_mode
+        max_file_mb=MAX_FILE_SIZE // (1024 * 1024)
     )
-
-
-@app.route("/profile-pic/<path:filename>")
-@login_required
-def profile_pic(filename):
-    filename = secure_filename(filename)
-    return send_from_directory(os.path.abspath(PROFILE_PICS_FOLDER), filename)
-
-
-@app.route("/profile/<username>")
-@login_required
-def profile(username):
-    target_email, target_user = get_user_by_username(username)
-
-    if not target_user:
-        flash("Profile not found.", "error")
-        return go("dashboard")
-
-    if target_email != current_user():
-        add_notification(
-            owner_email=target_email,
-            notif_type="profile_view",
-            message=f"{current_username()} viewed your profile.",
-            from_email=current_user(),
-            from_username=current_username()
-        )
-
-    return redirect(url_for("home", view="profile", u=target_user.get("username", username)))
 
 
 @app.route("/register", methods=["POST"])
 def register():
+    try:
+        db = load_db()
+    except Exception as e:
+        flash(f"Discord database error: {e}", "error")
+        return redirect(url_for("home", view="register"))
+
     username = request.form.get("username", "").strip()
     email = request.form.get("email", "").strip().lower()
     password = request.form.get("password", "")
 
     if not valid_username(username):
         flash("Username must be 3-20 characters and only use letters, numbers, underscore, or dot.", "error")
-        return redirect(url_for("home", view="register"))
-
-    if username_exists(username):
-        flash("Username already exists. Choose another one.", "error")
         return redirect(url_for("home", view="register"))
 
     if "@" not in email or "." not in email:
@@ -1809,34 +1411,53 @@ def register():
         flash("Password must be at least 6 characters.", "error")
         return redirect(url_for("home", view="register"))
 
-    users = load_users()
+    key = user_key(email)
 
-    if email in users:
+    if key in db["users"]:
         flash("Account already exists. Please login instead.", "error")
         return redirect(url_for("home", view="login"))
 
-    users[email] = {
+    for existing_user in db["users"].values():
+        if existing_user.get("username",users"]:
+        flash("Account already exists. Please login instead.", "error")
+        return redirect(url_for("home", view="login"))
+
+    "").strip().lower() == username.lower():
+            flash("Username already exists. Choose another one.", "error")
+            return redirect(url_for("home", view="register"))
+
+    user = {
+        "id": key,
         "username": username,
+        "email": email,
         "password_hash": generate_password_hash(password),
-        "description": "",
-        "profile_pic": "",
         "created": int(time.time())
     }
 
-    save_users(users)
+    try:
+        save_user(user)
+    except Exception as e:
+        flash(f"Could not save user to Discord: {e}", "error")
+        return redirect(url_for("home", view="register"))
 
     session["email"] = email
+
     flash("Account created successfully.", "success")
     return go("dashboard")
 
 
 @app.route("/login", methods=["POST"])
 def login():
+    try:
+        db = load_db()
+    except Exception as e:
+        flash(f"Discord database error: {e}", "error")
+        return redirect(url_for("home", view="login"))
+
     email = request.form.get("email", "").strip().lower()
     password = request.form.get("password", "")
 
-    users = load_users()
-    user = users.get(email)
+    user = db["users"].get(user_key(email))
 
     if not user:
         flash("Account not found. Please create an account first.", "error")
@@ -1860,75 +1481,33 @@ def logout():
     return redirect(url_for("home", view="login"))
 
 
-@app.route("/update-profile", methods=["POST"])
-@login_required
-def update_profile():
-    email = current_user()
-    users = load_users()
-    user = users.get(email)
-
-    if not user:
-        session.clear()
-        flash("Account not found.", "error")
-        return redirect(url_for("home", view="login"))
-
-    description = request.form.get("description", "").strip()[:600]
-    user["description"] = description
-
-    pic = request.files.get("profile_pic")
-
-    if pic and pic.filename:
-        if not allowed_profile_pic(pic.filename):
-            flash("Profile picture must be PNG, JPG, JPEG, or WEBP.", "error")
-            return go("account")
-
-        ext = os.path.splitext(pic.filename.lower())[1]
-        new_filename = secure_filename(f"{secrets.token_hex(12)}{ext}")
-        save_path = os.path.join(PROFILE_PICS_FOLDER, new_filename)
-
-        old_pic = user.get("profile_pic", "")
-        if old_pic:
-            old_path = os.path.join(PROFILE_PICS_FOLDER, secure_filename(old_pic))
-            if os.path.exists(old_path):
-                os.remove(old_path)
-
-        pic.save(save_path)
-        user["profile_pic"] = new_filename
-
-    users[email] = user
-    save_users(users)
-
-    flash("Profile updated.", "success")
-    return go("account")
-
-
 @app.route("/change-username", methods=["POST"])
 @login_required
 def change_username():
-    email = current_user()
+    user = current_user()
+    db = load_db()
+
     new_username = request.form.get("new_username", "").strip()
 
     if not valid_username(new_username):
         flash("Username must be 3-20 characters and only use letters, numbers, underscore, or dot.", "error")
         return go("account")
 
-    if username_exists(new_username, ignore_email=email):
-        flash("Username already exists. Choose another one.", "error")
-        return go("account")
+    for existing_user in db["users"].values():
+        same_username = existing_user.get("username", "").strip().lower() == new_username.lower()
+        different_account = existing_user.get("email", "").lower() != user.get("email", "").lower()
 
-    users = load_users()
-    user = users.get(email)
-
-    if not user:
-        session.clear()
-        flash("Account not found.", "error")
-        return redirect(url_for("home", view="login"))
+        if same_username and different_account:
+            flash("Username already exists. Choose another one.", "error")
+            return go("account")
 
     user["username"] = new_username
-    users[email] = user
-    save_users(users)
 
-    update_author_name(email, new_username)
+    try:
+        save_user(user)
+    except Exception as e:
+        flash(f"Could not update username: {e}", "error")
+        return go("account")
 
     flash("Username changed successfully.", "success")
     return go("account")
@@ -1937,17 +1516,10 @@ def change_username():
 @app.route("/change-password", methods=["POST"])
 @login_required
 def change_password():
-    email = current_user()
+    user = current_user()
+
     old_password = request.form.get("old_password", "")
     new_password = request.form.get("new_password", "")
-
-    users = load_users()
-    user = users.get(email)
-
-    if not user:
-        session.clear()
-        flash("Account not found.", "error")
-        return redirect(url_for("home", view="login"))
 
     if not check_password_hash(user.get("password_hash", ""), old_password):
         flash("Old password is wrong.", "error")
@@ -1958,8 +1530,12 @@ def change_password():
         return go("account")
 
     user["password_hash"] = generate_password_hash(new_password)
-    users[email] = user
-    save_users(users)
+
+    try:
+        save_user(user)
+    except Exception as e:
+        flash(f"Could not update password: {e}", "error")
+        return go("account")
 
     flash("Password changed successfully.", "success")
     return go("account")
@@ -1968,210 +1544,184 @@ def change_password():
 @app.route("/upload", methods=["POST"])
 @login_required
 def upload():
+    user = current_user()
+
     if "uploadfile" not in request.files:
         flash("No file selected.", "error")
         return go("files")
 
-    file = request.files["uploadfile"]
+    uploaded = request.files["uploadfile"]
 
-    if file.filename == "":
+    if uploaded.filename == "":
         flash("No file selected.", "error")
         return go("files")
 
-    if not allowed_file(file.filename):
+    if not allowed_file(uploaded.filename):
         flash("Only ZIP and MP3 files are allowed.", "error")
         return go("files")
 
-    filename = secure_filename(file.filename)
-    save_path = os.path.join(UPLOAD_FOLDER, filename)
+    original_name = secure_filename(uploaded.filename)
+    file_bytes = uploaded.read()
+    size = len(file_bytes)
 
-    if os.path.exists(save_path):
-        name, ext = os.path.splitext(filename)
-        filename = f"{name}_{int(time.time())}{ext}"
-        save_path = os.path.join(UPLOAD_FOLDER, filename)
+    if size <= 0:
+        flash("Empty file is not allowed.", "error")
+        return go("files")
 
-    file.save(save_path)
+    if size > MAX_FILE_SIZE:
+        flash(f"File too large. Max size is {MAX_FILE_SIZE // (1024 * 1024)} MB.", "error")
+        return go("files")
 
-    meta = load_files_meta()
-    meta[filename] = {
-        "owner": current_username(),
-        "owner_email": current_user(),
-        "uploaded": int(time.time())
+    file_id = secrets.token_hex(12)
+
+    metadata = {
+        "id": file_id,
+        "original_name": original_name,
+        "size": size,
+        "author": user.get("username"),
+        "author_email": user.get("email"),
+        "created": int(time.time())
     }
-    save_files_meta(meta)
+
+    try:
+        save_file_record(
+            metadata=metadata,
+            filename=original_name,
+            file_bytes=file_bytes,
+            content_type=uploaded.content_type
+        )
+    except Exception as e:
+        flash(f"Could not upload file to Discord: {e}", "error")
+        return go("files")
 
     flash("File uploaded successfully.", "success")
     return go("files")
 
 
-@app.route("/download/<path:filename>")
+@app.route("/download/<file_id>")
 @login_required
-def download(filename):
-    filename = secure_filename(filename)
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-
-    if not os.path.exists(file_path):
-        flash("File not found on server.", "error")
+def download(file_id):
+    try:
+        db = load_db()
+    except Exception as e:
+        flash(f"Discord database error: {e}", "error")
         return go("files")
 
-    meta = load_files_meta()
-    file_data = meta.get(filename, {})
+    file_data = db["files"].get(file_id)
 
-    if file_data.get("owner_email") and file_data.get("owner_email") != current_user():
-        add_notification(
-            owner_email=file_data.get("owner_email"),
-            notif_type="download",
-            message=f"{current_username()} downloaded your file: {filename}",
-            from_email=current_user(),
-            from_username=current_username(),
-            extra={"filename": filename}
-        )
+    if not file_data:
+        flash("File not found.", "error")
+        return go("files")
 
-    return send_from_directory(
-        os.path.abspath(UPLOAD_FOLDER),
-        filename,
-        as_attachment=True
+    attachment_url = file_data.get("attachment_url")
+
+    if not attachment_url:
+        flash("Discord attachment URL not found.", "error")
+        return go("files")
+
+    try:
+        response = requests.get(attachment_url, timeout=60)
+        response.raise_for_status()
+    except Exception as e:
+        flash(f"Could not download Discord attachment: {e}", "error")
+        return go("files")
+
+    return send_file(
+        BytesIO(response.content),
+        as_attachment=True,
+        download_name=file_data.get("original_name", "download"),
+        mimetype="application/octet-stream"
     )
-
-
-@app.route("/delete-file/<path:filename>", methods=["POST"])
-@login_required
-def delete_file(filename):
-    filename = secure_filename(filename)
-
-    meta = load_files_meta()
-    file_data = meta.get(filename, {})
-
-    if file_data.get("owner_email") != current_user():
-        flash("You can only delete files you uploaded.", "error")
-        return go("files")
-
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
-    if filename in meta:
-        del meta[filename]
-        save_files_meta(meta)
-
-    flash("File deleted.", "success")
-    return go("files")
 
 
 @app.route("/topic", methods=["POST"])
 @login_required
 def add_topic():
+    user = current_user()
+
     title = request.form.get("title", "").strip()
     body = request.form.get("body", "").strip()
 
     if not title or not body:
-        flash("Post title and text are required.", "error")
+        flash("Topic title and text are required.", "error")
         return go("discussion")
 
-    topic_id = str(int(time.time() * 1000))
+    topic_id = secrets.token_hex(12)
 
-    discussions = load_discussions()
-
-    discussions.insert(0, {
+    topic = {
         "id": topic_id,
         "title": title[:120],
-        "body": body[:3000],
-        "author": current_username(),
-        "author_email": current_user(),
-        "created": int(time.time()),
-        "comments": []
-    })
+        "body": body[:1200],
+        "author": user.get("username"),
+        "author_email": user.get("email"),
+        "created": int(time.time())
+    }
 
-    save_discussions(discussions)
+    try:
+        save_topic(topic)
+    except Exception as e:
+        flash(f"Could not save topic to Discord: {e}", "error")
+        return go("discussion")
 
-    flash("Post added.", "success")
+    flash("Topic added.", "success")
     return go("topic", topic_id)
-
-
-@app.route("/delete-topic/<topic_id>", methods=["POST"])
-@login_required
-def delete_topic(topic_id):
-    discussions = load_discussions()
-
-    for topic in discussions:
-        if topic.get("id") == topic_id:
-            if topic.get("author_email") != current_user():
-                flash("You can only delete posts you created.", "error")
-                return go("discussion")
-
-            discussions = [t for t in discussions if t.get("id") != topic_id]
-            save_discussions(discussions)
-            flash("Post deleted.", "success")
-            return go("discussion")
-
-    flash("Post not found.", "error")
-    return go("discussion")
 
 
 @app.route("/comment/<topic_id>", methods=["POST"])
 @login_required
 def add_comment(topic_id):
+    user = current_user()
+    db = load_db()
+
+    if topic_id not in db["topics"]:
+        flash("Topic not found.", "error")
+        return go("discussion")
+
     body = request.form.get("body", "").strip()
 
     if not body:
         flash("Comment cannot be empty.", "error")
         return go("topic", topic_id)
 
-    discussions = load_discussions()
-    found = False
-    topic_owner_email = ""
-    topic_title = ""
+    comment_id = secrets.token_hex(12)
 
-    for topic in discussions:
-        if topic["id"] == topic_id:
-            topic["comments"].append({
-                "author": current_username(),
-                "author_email": current_user(),
-                "body": body[:2000],
-                "time": int(time.time())
-            })
-            topic_owner_email = topic.get("author_email", "")
-            topic_title = topic.get("title", "")
-            found = True
-            break
+    comment = {
+        "id": comment_id,
+        "topic_id": topic_id,
+        "body": body[:900],
+        "author": user.get("username"),
+        "author_email": user.get("email"),
+        "created": int(time.time())
+    }
 
-    save_discussions(discussions)
-
-    if found:
-        if topic_owner_email and topic_owner_email != current_user():
-            add_notification(
-                owner_email=topic_owner_email,
-                notif_type="comment",
-                message=f"{current_username()} commented on your post: {topic_title}",
-                from_email=current_user(),
-                from_username=current_username(),
-                extra={"topic_id": topic_id}
-            )
-
-        flash("Comment added.", "success")
+    try:
+        save_comment(comment)
+    except Exception as e:
+        flash(f"Could not save comment to Discord: {e}", "error")
         return go("topic", topic_id)
 
-    flash("Post not found.", "error")
-    return go("discussion")
+    flash("Comment added.", "success")
+    return go("topic", topic_id)
 
 
-@app.route("/clear-notifications", methods=["POST"])
-@login_required
-def clear_notifications():
-    email = current_user()
-    notifications = load_notifications()
-    notifications = [n for n in notifications if n.get("owner_email") != email]
-    save_notifications(notifications)
-
-    flash("Notifications cleared.", "success")
-    return go("notifications")
+@app.route("/discord-test")
+def discord_test():
+    try:
+        messages = fetch_all_discord_messages()
+        return f"DISCORD DATABASE WORKS. Messages found: {len(messages)}"
+    except Exception as e:
+        return f"DISCORD DATABASE ERROR: {e}"
 
 
 @app.errorhandler(413)
 def too_large(error):
-    flash("File too large. Maximum file size is 1 GB.", "error")
+    flash(f"File too large. Max size is {MAX_FILE_SIZE // (1024 * 1024)} MB.", "error")
     return go("files")
+
+
+@app.errorhandler(404)
+def not_found(error):
+    return redirect(url_for("home"))
 
 
 if __name__ == "__main__":
