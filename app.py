@@ -27,43 +27,23 @@ ALLOWED_EXTENSIONS = {".zip", ".mp3"}
 ALLOWED_PFP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 CACHE_SECONDS = 2
-CACHE = {
-    "time": 0,
-    "store": None
-}
+CACHE = {"time": 0, "store": None}
 
 CREDITS = {
-    "OWNERS": [
-        "DJ TUTTER",
-        "DJ LIRA DA ZL"
-    ],
-    "MEMBERS": [
-        "DJ FRG 011",
-        "DJ PLT 011",
-        "DJ RGLX",
-        "DJ RDC",
-        "DJ SABA 7",
-        "DJ RE7 013",
-        "RSFI",
-        "DJ RDC"
-    ],
-    "WEBSITE MADE BY": [
-        "DJ SABA 7"
-    ]
+    "OWNERS": ["DJ TUTTER", "DJ LIRA DA ZL"],
+    "MEMBERS": ["DJ FRG 011", "DJ PLT 011", "DJ RGLX", "DJ RDC", "DJ SABA 7", "DJ RE7 013", "RSFI", "DJ RDC"],
+    "WEBSITE MADE BY": ["DJ SABA 7"]
 }
 
-
-# ============================================================
-# DISCORD SNAPSHOT DATABASE SYSTEM
-# ============================================================
 
 def blank_db():
     return {
-        "version": 3,
+        "version": 4,
         "users": {},
         "topics": {},
         "comments": {},
         "files": {},
+        "dms": {},
         "created_at": int(time.time()),
         "updated_at": int(time.time())
     }
@@ -76,11 +56,11 @@ def normalize_db(db):
     clean = blank_db()
     clean.update(db)
 
-    for key in ["users", "topics", "comments", "files"]:
+    for key in ["users", "topics", "comments", "files", "dms"]:
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 3
+    clean["version"] = 4
     return clean
 
 
@@ -95,25 +75,17 @@ def discord_request(method, endpoint, **kwargs):
     require_discord_config()
 
     url = endpoint if endpoint.startswith("http") else f"{DISCORD_API}{endpoint}"
-
     headers = kwargs.pop("headers", {})
     headers["Authorization"] = f"Bot {DISCORD_BOT_TOKEN}"
 
     for _ in range(5):
-        response = requests.request(
-            method,
-            url,
-            headers=headers,
-            timeout=45,
-            **kwargs
-        )
+        response = requests.request(method, url, headers=headers, timeout=45, **kwargs)
 
         if response.status_code == 429:
             try:
                 retry_after = float(response.json().get("retry_after", 1))
             except Exception:
                 retry_after = 1
-
             time.sleep(retry_after)
             continue
 
@@ -140,12 +112,7 @@ def fetch_discord_messages():
         if before:
             params["before"] = before
 
-        response = discord_request(
-            "GET",
-            f"/channels/{DISCORD_DB_CHANNEL_ID}/messages",
-            params=params
-        )
-
+        response = discord_request("GET", f"/channels/{DISCORD_DB_CHANNEL_ID}/messages", params=params)
         messages = response.json()
 
         if not messages:
@@ -175,9 +142,7 @@ def post_discord_text(content):
 def post_discord_attachment(content, filename, file_bytes, content_type):
     payload = {"content": content}
 
-    data = {
-        "payload_json": json.dumps(payload)
-    }
+    data = {"payload_json": json.dumps(payload)}
 
     files = {
         "files[0]": (
@@ -270,7 +235,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v3|{int(time.time())}",
+        content=f"SWDBSNAP|v4|{int(time.time())}",
         filename="smartweb-db.json",
         file_bytes=raw,
         content_type="application/json"
@@ -294,10 +259,6 @@ def save_profile_picture_to_discord(pfp_id, filename, file_bytes, content_type):
         content_type=content_type or "application/octet-stream"
     )
 
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def user_id_from_email(email):
     return hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()
@@ -424,11 +385,8 @@ def public_file(file_data, db=None):
         "id": file_data.get("id", ""),
         "name": file_data.get("original_name", "file"),
         "size": size_text(file_data.get("size", 0)),
-        "author": username_from_id(
-            file_data.get("author_id", ""),
-            db,
-            file_data.get("author", "unknown")
-        ),
+        "author": username_from_id(file_data.get("author_id", ""), db, file_data.get("author", "unknown")),
+        "author_id": file_data.get("author_id", ""),
         "created": int(file_data.get("created", 0)),
     }
 
@@ -460,11 +418,8 @@ def public_topic(topic_data, db=None):
             {
                 "id": c.get("id", ""),
                 "body": c.get("body", ""),
-                "author": username_from_id(
-                    c.get("author_id", ""),
-                    db,
-                    c.get("author", "unknown")
-                ),
+                "author": username_from_id(c.get("author_id", ""), db, c.get("author", "unknown")),
+                "author_id": c.get("author_id", ""),
                 "created": int(c.get("created", 0)),
             }
             for c in topic_comments
@@ -472,9 +427,39 @@ def public_topic(topic_data, db=None):
     }
 
 
-# ============================================================
-# HTML OLD STYLE LAYOUT
-# ============================================================
+def public_user(user, db, store, viewer_id):
+    uid = user.get("id", "")
+    username = user.get("username", "unknown")
+
+    return {
+        "id": uid,
+        "username": username,
+        "email": user.get("email", "") if uid == viewer_id else "",
+        "about": user.get("about", ""),
+        "joined": int(user.get("created", 0)),
+        "pfp_url": pfp_url_from_user(user, store),
+        "topic_count": len([t for t in db["topics"].values() if t.get("author_id") == uid]),
+        "comment_count": len([c for c in db["comments"].values() if c.get("author_id") == uid]),
+        "file_count": len([f for f in db["files"].values() if f.get("author_id") == uid])
+    }
+
+
+def public_dm_messages(db, current_id):
+    messages = []
+
+    for dm in db["dms"].values():
+        if dm.get("from") == current_id or dm.get("to") == current_id:
+            messages.append({
+                "id": dm.get("id", ""),
+                "from": dm.get("from", ""),
+                "to": dm.get("to", ""),
+                "body": dm.get("body", ""),
+                "created": int(dm.get("created", 0))
+            })
+
+    messages.sort(key=lambda x: x["created"])
+    return messages
+
 
 HTML = """
 <!DOCTYPE html>
@@ -484,9 +469,7 @@ HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
-*{
-    box-sizing:border-box;
-}
+*{box-sizing:border-box}
 
 :root{
     --white:#ffffff;
@@ -494,9 +477,8 @@ HTML = """
     --muted:rgba(255,255,255,.72);
     --soft:rgba(255,255,255,.54);
     --blue:#9fe7ff;
-    --blue2:#4eb8ff;
     --dark:#06101d;
-    --panel:rgba(3,13,24,.74);
+    --panel:rgba(3,13,24,.76);
     --panel2:rgba(0,0,0,.34);
     --line:rgba(255,255,255,.26);
     --line2:rgba(255,255,255,.14);
@@ -509,10 +491,9 @@ body{
     color:var(--text);
     font-family:Arial,Helvetica,sans-serif;
     background:
-        linear-gradient(rgba(2,8,16,.70), rgba(2,8,16,.84)),
-        radial-gradient(circle at 18% 18%, rgba(125,215,255,.34), transparent 28%),
-        radial-gradient(circle at 84% 78%, rgba(43,110,190,.32), transparent 35%),
-        url("/static/bg.png");
+        linear-gradient(rgba(2,8,16,.70), rgba(2,8,16,.86)),
+        radial-gradient(circle at 18% 18%, rgba(125,215,255,.26), transparent 28%),
+        radial-gradient(circle at 84% 78%, rgba(43,110,190,.24), transparent 35%);
     background-size:cover;
     background-position:center;
     overflow:hidden;
@@ -523,24 +504,10 @@ body::before{
     position:fixed;
     inset:0;
     background-image:
-        linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+        linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
     background-size:24px 24px;
     opacity:.65;
-    pointer-events:none;
-    z-index:0;
-}
-
-body::after{
-    content:"";
-    position:fixed;
-    width:420px;
-    height:420px;
-    right:-150px;
-    top:-160px;
-    background:rgba(159,231,255,.17);
-    filter:blur(35px);
-    border-radius:50%;
     pointer-events:none;
     z-index:0;
 }
@@ -565,31 +532,14 @@ body::after{
 }
 
 .login-shell{
-    width:370px;
-    background:rgba(220,245,255,.20);
-    border:1px solid rgba(255,255,255,.42);
+    width:390px;
+    background:rgba(3,13,24,.78);
+    border:1px solid rgba(255,255,255,.28);
     backdrop-filter:blur(18px);
     -webkit-backdrop-filter:blur(18px);
     box-shadow:0 28px 80px rgba(0,0,0,.50);
     border-radius:6px;
     padding:32px;
-    position:relative;
-    overflow:hidden;
-}
-
-.login-shell::before{
-    content:"";
-    position:absolute;
-    inset:0;
-    background:
-        linear-gradient(120deg, rgba(255,255,255,.32), transparent 42%),
-        radial-gradient(circle at 20% 0%, rgba(255,255,255,.20), transparent 35%);
-    pointer-events:none;
-}
-
-.login-inner{
-    position:relative;
-    z-index:2;
 }
 
 .login-logo{
@@ -603,19 +553,18 @@ body::after{
 .login-logo::after{
     content:"";
     display:block;
-    width:46px;
+    width:110px;
     height:2px;
     background:var(--blue);
     margin-top:12px;
 }
 
 .login-title{
-    font-size:30px;
+    font-size:34px;
     font-weight:900;
     color:white;
     margin-bottom:8px;
     letter-spacing:-1px;
-    text-shadow:0 3px 18px rgba(0,0,0,.40);
 }
 
 .login-sub{
@@ -627,46 +576,23 @@ body::after{
 
 .login-input-wrap{
     position:relative;
-    margin-bottom:16px;
+    margin-bottom:14px;
 }
 
 .login-input-wrap input{
     width:100%;
-    background:transparent;
-    border:none;
-    border-bottom:1px solid rgba(255,255,255,.70);
+    background:rgba(0,0,0,.28);
+    border:1px solid rgba(255,255,255,.24);
     color:white;
     outline:none;
-    padding:13px 32px 11px 0;
+    padding:13px 14px;
     font-size:14px;
     font-weight:700;
 }
 
 .login-input-wrap input::placeholder{
-    color:rgba(255,255,255,.70);
+    color:rgba(255,255,255,.60);
     font-weight:500;
-}
-
-.login-icon{
-    position:absolute;
-    right:2px;
-    top:12px;
-    color:white;
-    font-size:14px;
-    opacity:.9;
-}
-
-.login-row{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    color:rgba(255,255,255,.74);
-    font-size:12px;
-    margin:6px 0 22px;
-}
-
-.login-row input{
-    accent-color:white;
 }
 
 .btn{
@@ -685,7 +611,7 @@ body::after{
 }
 
 .btn-dark{
-    background:#06101d;
+    background:#071827;
     color:white;
 }
 
@@ -708,7 +634,7 @@ body::after{
 
 .login-line{
     height:1px;
-    background:rgba(255,255,255,.30);
+    background:rgba(255,255,255,.20);
     margin:18px 0 14px;
 }
 
@@ -720,13 +646,12 @@ body::after{
 }
 
 .switch-text a{
-    color:white;
+    color:var(--blue);
     font-weight:900;
     text-decoration:none;
 }
 
-.alert-box,
-.success-box{
+.alert-box,.success-box{
     padding:12px 14px;
     margin-bottom:18px;
     font-size:14px;
@@ -764,14 +689,14 @@ body::after{
     font-size:12px;
     letter-spacing:3px;
     color:white;
-    margin-bottom:34px;
+    margin-bottom:30px;
     font-weight:900;
 }
 
 .title::after{
     content:"";
     display:block;
-    width:42px;
+    width:110px;
     height:2px;
     background:var(--blue);
     margin-top:12px;
@@ -844,10 +769,11 @@ body::after{
     border-radius:4px;
     font-size:14px;
     letter-spacing:.4px;
+    text-transform:uppercase;
+    font-weight:900;
 }
 
-.item:hover,
-.item.active{
+.item:hover,.item.active{
     color:white;
     background:rgba(255,255,255,.13);
     transform:translateX(4px);
@@ -858,9 +784,9 @@ body::after{
 }
 
 @keyframes clickFade{
-    0%{opacity:1}
-    40%{opacity:.45;transform:translateX(8px)}
-    100%{opacity:1;transform:translateX(4px)}
+    0%{opacity:1; transform:scale(1)}
+    40%{opacity:.55; transform:scale(.97)}
+    100%{opacity:1; transform:scale(1)}
 }
 
 .content{
@@ -881,18 +807,9 @@ body::after{
     transform:translateY(8px);
 }
 
-.content::-webkit-scrollbar{
-    width:10px;
-}
-
-.content::-webkit-scrollbar-track{
-    background:rgba(255,255,255,.04);
-}
-
-.content::-webkit-scrollbar-thumb{
-    background:rgba(255,255,255,.28);
-    border-radius:4px;
-}
+.content::-webkit-scrollbar{width:10px}
+.content::-webkit-scrollbar-track{background:rgba(255,255,255,.04)}
+.content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.28);border-radius:4px}
 
 .page-title{
     font-size:34px;
@@ -900,7 +817,6 @@ body::after{
     margin-bottom:10px;
     color:white;
     letter-spacing:-1px;
-    text-shadow:0 2px 14px rgba(0,0,0,.45);
 }
 
 .page-sub{
@@ -958,8 +874,7 @@ body::after{
     max-width:980px;
 }
 
-input,
-textarea{
+input,textarea{
     background:rgba(0,0,0,.36);
     color:white;
     border:1px solid rgba(255,255,255,.34);
@@ -970,13 +885,11 @@ textarea{
     backdrop-filter:blur(10px);
 }
 
-input::placeholder,
-textarea::placeholder{
+input::placeholder,textarea::placeholder{
     color:rgba(255,255,255,.62);
 }
 
-input:focus,
-textarea:focus{
+input:focus,textarea:focus{
     border-color:var(--blue);
     background:rgba(0,0,0,.48);
 }
@@ -993,14 +906,7 @@ textarea{
     margin-bottom:26px;
 }
 
-.row{
-    margin-bottom:16px;
-}
-
-.file-row,
-.topic-row,
-.credit-row,
-.comment-row{
+.file-row,.topic-row,.credit-row,.comment-row,.user-row,.dm-row{
     margin-bottom:16px;
     padding:16px 18px;
     background:rgba(0,0,0,.34);
@@ -1009,28 +915,20 @@ textarea{
     transition:.18s ease;
 }
 
-.file-row:hover,
-.topic-row:hover,
-.credit-row:hover,
-.comment-row:hover{
+.file-row:hover,.topic-row:hover,.credit-row:hover,.comment-row:hover,.user-row:hover,.dm-row:hover{
     background:rgba(0,0,0,.46);
     border-color:rgba(157,228,255,.58);
     transform:translateY(-1px);
 }
 
-.file-title,
-.credit-name,
-.topic-title{
+.file-title,.credit-name,.topic-title{
     font-size:15px;
     color:white;
     margin-bottom:7px;
     font-weight:900;
 }
 
-.meta,
-.topic-meta,
-.comment-meta,
-.small{
+.meta,.topic-meta,.comment-meta,.small{
     color:var(--muted);
     font-size:14px;
     line-height:1.7;
@@ -1040,9 +938,7 @@ textarea{
     white-space:pre-wrap;
 }
 
-.file-link,
-.topic-open,
-.fake-link{
+.file-link,.topic-open,.fake-link,.name-link{
     color:var(--blue);
     text-decoration:none;
     font-size:14px;
@@ -1052,9 +948,7 @@ textarea{
     font-weight:900;
 }
 
-.file-link:hover,
-.topic-open:hover,
-.fake-link:hover{
+.file-link:hover,.topic-open:hover,.fake-link:hover,.name-link:hover{
     color:white;
     padding-left:5px;
 }
@@ -1066,8 +960,7 @@ textarea{
     max-width:740px;
 }
 
-button,
-.file-button{
+button,.file-button{
     display:inline-flex;
     align-items:center;
     justify-content:center;
@@ -1085,8 +978,7 @@ button,
     backdrop-filter:blur(10px);
 }
 
-button:hover,
-.file-button:hover{
+button:hover,.file-button:hover{
     background:#102b43;
     border-color:var(--blue);
     transform:translateY(-1px);
@@ -1165,14 +1057,14 @@ button:hover,
     border-top:1px solid rgba(255,255,255,.22);
 }
 
-.account-pfp{
+.account-pfp,.profile-head{
     display:flex;
     align-items:center;
     gap:14px;
     margin-bottom:22px;
 }
 
-.account-pfp .pfp-box{
+.account-pfp .pfp-box,.profile-head .pfp-box{
     width:64px;
     height:64px;
     font-size:24px;
@@ -1186,9 +1078,7 @@ button:hover,
     font-weight:900;
 }
 
-.credit-heading:first-child{
-    margin-top:0;
-}
+.credit-heading:first-child{margin-top:0}
 
 .credit-divider{
     border-top:1px solid rgba(255,255,255,.28);
@@ -1213,33 +1103,33 @@ button:hover,
     font-weight:800;
 }
 
+.dm-message{
+    max-width:70%;
+    margin-bottom:12px;
+    padding:12px 14px;
+    border-radius:5px;
+    border:1px solid rgba(255,255,255,.18);
+    background:rgba(255,255,255,.08);
+}
+
+.dm-message.me{
+    margin-left:auto;
+    background:rgba(159,231,255,.14);
+    border-color:rgba(159,231,255,.32);
+}
+
+.dm-message.them{
+    margin-right:auto;
+    background:rgba(0,0,0,.34);
+}
+
 @media(max-width:900px){
-    body{
-        overflow:auto;
-    }
-
-    .app{
-        height:auto;
-        min-height:100vh;
-        flex-direction:column;
-    }
-
-    .side{
-        width:100%;
-    }
-
-    .content{
-        padding:28px;
-    }
-
-    .grid{
-        grid-template-columns:1fr;
-    }
-
-    .account-box,
-    .search-bar{
-        width:100%;
-    }
+    body{overflow:auto}
+    .app{height:auto;min-height:100vh;flex-direction:column}
+    .side{width:100%}
+    .content{padding:28px}
+    .grid{grid-template-columns:1fr}
+    .account-box,.search-bar{width:100%}
 }
 </style>
 </head>
@@ -1250,83 +1140,69 @@ button:hover,
 
 <div class="login-only">
     <div class="login-shell">
-        <div class="login-inner">
-            <div class="login-logo">FLOWZNMELHOR</div>
+        <div class="login-logo">FLOWZNMELHOR</div>
 
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                    {% set category = messages[0][0] %}
-                    {% set message = messages[0][1] %}
-                    {% if category == "success" %}
-                        <div class="success-box">{{ message }}</div>
-                    {% else %}
-                        <div class="alert-box">{{ message }}</div>
-                    {% endif %}
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% set category = messages[0][0] %}
+                {% set message = messages[0][1] %}
+                {% if category == "success" %}
+                    <div class="success-box">{{ message }}</div>
+                {% else %}
+                    <div class="alert-box">{{ message }}</div>
                 {% endif %}
-            {% endwith %}
-
-            {% if auth_mode == "register" %}
-                <div class="login-title">Create account</div>
-                <div class="login-sub">Join the producer room. Upload beats, ZIP packs, patterns and discussions.</div>
-
-                <form action="/register" method="POST">
-                    <div class="login-input-wrap">
-                        <input name="username" placeholder="Username" required>
-                        <span class="login-icon">◆</span>
-                    </div>
-
-                    <div class="login-input-wrap">
-                        <input name="email" type="email" placeholder="Email" required>
-                        <span class="login-icon">✉</span>
-                    </div>
-
-                    <div class="login-input-wrap">
-                        <input name="password" type="password" placeholder="Password" required>
-                        <span class="login-icon">■</span>
-                    </div>
-
-                    <button class="btn btn-white" type="submit">Create Account</button>
-                </form>
-
-                <div class="login-line"></div>
-
-                <button class="btn btn-dark" onclick="location.href='/?view=login'">Back to Login</button>
-
-                <div class="switch-text">
-                    Already have an account? <a href="/?view=login">Login</a>
-                </div>
-            {% else %}
-                <div class="login-title">Login</div>
-                <div class="login-sub">Private producer space for files, discussion, credits and account settings.</div>
-
-                <form action="/login" method="POST">
-                    <div class="login-input-wrap">
-                        <input name="email" type="email" placeholder="Email" required>
-                        <span class="login-icon">✉</span>
-                    </div>
-
-                    <div class="login-input-wrap">
-                        <input name="password" type="password" placeholder="Password" required>
-                        <span class="login-icon">■</span>
-                    </div>
-
-                    <div class="login-row">
-                        <label><input type="checkbox" checked> Remember me</label>
-                        <span>discord db</span>
-                    </div>
-
-                    <button class="btn btn-dark" type="submit">Login</button>
-                </form>
-
-                <div class="login-line"></div>
-
-                <button class="btn btn-white" onclick="location.href='/?view=register'">Create Account</button>
-
-                <div class="switch-text">
-                    New producer? <a href="/?view=register">Register</a>
-                </div>
             {% endif %}
-        </div>
+        {% endwith %}
+
+        {% if auth_mode == "register" %}
+            <div class="login-title">Create account</div>
+            <div class="login-sub">Join the producer room. Upload beats, ZIP packs, patterns and discussions.</div>
+
+            <form action="/register" method="POST">
+                <div class="login-input-wrap">
+                    <input name="username" placeholder="Username" required>
+                </div>
+
+                <div class="login-input-wrap">
+                    <input name="email" type="email" placeholder="Email" required>
+                </div>
+
+                <div class="login-input-wrap">
+                    <input name="password" type="password" placeholder="Password" required>
+                </div>
+
+                <button class="btn btn-white" type="submit">Create Account</button>
+            </form>
+
+            <div class="login-line"></div>
+            <button class="btn btn-dark" onclick="location.href='/?view=login'">Back to Login</button>
+
+            <div class="switch-text">
+                Already have an account? <a href="/?view=login">Login</a>
+            </div>
+        {% else %}
+            <div class="login-title">Login</div>
+            <div class="login-sub">Private producer space for files, discussion, DMs, credits and account settings.</div>
+
+            <form action="/login" method="POST">
+                <div class="login-input-wrap">
+                    <input name="email" type="email" placeholder="Email" required>
+                </div>
+
+                <div class="login-input-wrap">
+                    <input name="password" type="password" placeholder="Password" required>
+                </div>
+
+                <button class="btn btn-dark" type="submit">Login</button>
+            </form>
+
+            <div class="login-line"></div>
+            <button class="btn btn-white" onclick="location.href='/?view=register'">Create Account</button>
+
+            <div class="switch-text">
+                New producer? <a href="/?view=register">Register</a>
+            </div>
+        {% endif %}
     </div>
 </div>
 
@@ -1336,7 +1212,7 @@ button:hover,
     <div class="side">
         <div class="title">FLOWZNMELHOR</div>
 
-        <div class="user-mini">
+        <div class="user-mini" onclick="showAccount(document.getElementById('menuAccount'))" style="cursor:pointer;">
             <div class="pfp-box">
                 {% if pfp_url %}
                     <img src="{{ pfp_url }}" alt="pfp">
@@ -1354,6 +1230,8 @@ button:hover,
             <div class="item" id="menuDashboard" onclick="showDashboard(this)">home</div>
             <div class="item" id="menuFiles" onclick="showFiles(this)">files</div>
             <div class="item" id="menuDiscussion" onclick="showDiscussion(this)">discussion</div>
+            <div class="item" id="menuDMs" onclick="showDMList(this)">messages</div>
+            <div class="item" id="menuUsers" onclick="showUsers(this)">profiles</div>
             <div class="item" id="menuNotifications" onclick="showNotifications(this)">notifications <span style="color:#9fe7ff">0</span></div>
         </div>
 
@@ -1388,8 +1266,11 @@ button:hover,
 const files = {{ files|tojson }};
 const credits = {{ credits|tojson }};
 const discussions = {{ topics|tojson }};
+const users = {{ users|tojson }};
+const dmMessages = {{ dm_messages|tojson }};
 const userEmail = {{ user_email|tojson }};
 const username = {{ username|tojson }};
+const currentUserId = {{ current_user_id|tojson }};
 const pfpUrl = {{ pfp_url|tojson }};
 const startView = {{ start_view|tojson }};
 const startTopicId = {{ start_topic_id|tojson }};
@@ -1403,7 +1284,7 @@ function clickEffect(el){
 }
 
 document.addEventListener("click", function(e){
-    const target = e.target.closest("button, .file-button, .item");
+    const target = e.target.closest("button, .file-button, .item, .fake-link, .topic-open, .name-link");
     if(target) clickEffect(target);
 });
 
@@ -1447,12 +1328,24 @@ function clearActive(){
     document.querySelectorAll(".item").forEach(i=>i.classList.remove("active"));
 }
 
-function setUrl(view, topicId=null){
-    if(view === "topic" && topicId){
-        window.history.replaceState(null, "", "/?view=topic&id=" + encodeURIComponent(topicId));
+function setUrl(view, id=null){
+    if(id){
+        window.history.replaceState(null, "", "/?view=" + encodeURIComponent(view) + "&id=" + encodeURIComponent(id));
     }else{
         window.history.replaceState(null, "", "/?view=" + encodeURIComponent(view));
     }
+}
+
+function userById(id){
+    return users.find(u=>u.id===id);
+}
+
+function smallPfp(user){
+    if(user && user.pfp_url){
+        return `<div class="pfp-box"><img src="${escapeAttr(user.pfp_url)}" alt="pfp"></div>`;
+    }
+    const letter = user && user.username ? user.username.charAt(0).toUpperCase() : "?";
+    return `<div class="pfp-box">${escapeHtml(letter)}</div>`;
 }
 
 function pfpHtml(){
@@ -1460,6 +1353,12 @@ function pfpHtml(){
         return `<div class="pfp-box"><img src="${escapeAttr(pfpUrl)}" alt="pfp"></div>`;
     }
     return `<div class="pfp-box">${escapeHtml(username.charAt(0).toUpperCase())}</div>`;
+}
+
+function nameLink(userId, fallback){
+    const u = userById(userId);
+    const name = u ? u.username : fallback;
+    return `<span class="name-link" onclick="openProfile('${escapeAttr(userId)}')">${escapeHtml(name)}</span>`;
 }
 
 function showDashboard(button){
@@ -1475,9 +1374,7 @@ function showDashboard(button){
 
     let html=`
         <div class="page-title">producer room</div>
-        <div class="page-sub">
-            Upload ZIP packs, share MP3 previews, start discussions, and build a private funk producer space.
-        </div>
+        <div class="page-sub">Upload ZIP packs, share MP3 previews, start discussions, and build a private funk producer space.</div>
 
         <div class="grid">
             <div class="card">
@@ -1493,9 +1390,9 @@ function showDashboard(button){
             </div>
 
             <div class="card">
-                <div class="card-label">comments</div>
-                <div class="card-number">${totalComments}</div>
-                <div class="card-text">Community replies and feedback.</div>
+                <div class="card-label">messages</div>
+                <div class="card-number">${dmMessages.length}</div>
+                <div class="card-text">Direct messages between members.</div>
             </div>
         </div>
 
@@ -1520,7 +1417,7 @@ function showDashboard(button){
         html += `
             <div class="file-row">
                 <div class="file-title">${escapeHtml(file.name)}</div>
-                <div class="meta">new file · ${escapeHtml(file.size)} · by ${escapeHtml(file.author)}</div>
+                <div class="meta">new file · ${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)}</div>
                 <a class="file-link" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
             </div>
         `;
@@ -1530,7 +1427,7 @@ function showDashboard(button){
         html += `
             <div class="topic-row">
                 <div class="topic-title">${escapeHtml(topic.title)}</div>
-                <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
+                <div class="topic-meta">by ${nameLink(topic.author_id, topic.author)} · ${topic.comments.length} comments</div>
                 <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
             </div>
         `;
@@ -1541,10 +1438,7 @@ function showDashboard(button){
 
         <div class="form-box">
             <div class="topic-title">make it feel alive</div>
-            <p class="small">
-                Add daily challenges, recent uploads, trending packs, beat feedback posts, top producers, and small stats.
-                Empty pages feel dead. Cards, activity, and challenges make the site feel active.
-            </p>
+            <p class="small">Cards, activity, profiles, direct messages, profile pictures and discussions make the site feel active.</p>
             <button onclick="showFiles(document.getElementById('menuFiles'))">upload file</button>
             <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">start discussion</button>
         </div>
@@ -1577,7 +1471,7 @@ function showFiles(button){
         html+=`
             <div class="file-row" data-name="${escapeAttr((file.name + ' ' + file.author).toLowerCase())}">
                 <div class="file-title">${escapeHtml(file.name)}</div>
-                <div class="meta">${escapeHtml(file.size)} · by ${escapeHtml(file.author)}</div>
+                <div class="meta">${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)}</div>
                 <a class="file-link" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
             </div>
         `;
@@ -1639,7 +1533,7 @@ function showDiscussion(button){
         html+=`
             <div class="topic-row" data-name="${escapeAttr(searchable)}">
                 <div class="topic-title">${escapeHtml(topic.title)}</div>
-                <div class="topic-meta">by ${escapeHtml(topic.author)} · ${topic.comments.length} comments</div>
+                <div class="topic-meta">by ${nameLink(topic.author_id, topic.author)} · ${topic.comments.length} comments</div>
                 <div class="small">${escapeHtml(topic.body).slice(0,140)}${topic.body.length > 140 ? "..." : ""}</div>
                 <br>
                 <div class="topic-open" onclick="openTopic('${topic.id}')">open discussion</div>
@@ -1687,7 +1581,7 @@ function openTopic(topicId){
 
     let html=`
         <div class="page-title">${escapeHtml(topic.title)}</div>
-        <div class="page-sub">by ${escapeHtml(topic.author)}</div>
+        <div class="page-sub">by ${nameLink(topic.author_id, topic.author)}</div>
 
         <button onclick="showDiscussion(document.getElementById('menuDiscussion'))">back to discussion</button>
     `;
@@ -1716,7 +1610,7 @@ function openTopic(topicId){
     topic.comments.forEach(comment=>{
         html+=`
             <div class="comment-row">
-                <div class="comment-meta">${escapeHtml(comment.author)}</div>
+                <div class="comment-meta">${nameLink(comment.author_id, comment.author)}</div>
                 <div class="small body-text">${escapeHtml(comment.body)}</div>
             </div>
         `;
@@ -1737,6 +1631,216 @@ function openTopic(topicId){
     fadeChange(html);
 }
 
+function showUsers(button){
+    clickEffect(button);
+    clearActive();
+    if(button) button.classList.add("active");
+
+    setUrl("profiles");
+
+    let html=`
+        <div class="page-title">profiles</div>
+        <div class="page-sub">Click a person to view their profile or send a direct message.</div>
+        <input id="userSearchInput" class="search-bar" placeholder="search profiles" oninput="filterUsers()">
+        <div class="line">
+    `;
+
+    users.forEach(u=>{
+        html += `
+            <div class="user-row" data-name="${escapeAttr(u.username.toLowerCase())}">
+                <div style="display:flex;align-items:center;gap:14px;">
+                    ${smallPfp(u)}
+                    <div>
+                        <div class="topic-title">${escapeHtml(u.username)}</div>
+                        <div class="meta">${u.topic_count} posts · ${u.file_count} files · ${u.comment_count} comments</div>
+                        <div class="topic-open" onclick="openProfile('${u.id}')">view profile</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    html += `</div>`;
+    fadeChange(html);
+}
+
+function filterUsers(){
+    const input=document.getElementById("userSearchInput");
+    if(!input) return;
+    const search=input.value.toLowerCase();
+
+    document.querySelectorAll(".user-row").forEach(row=>{
+        const name=row.getAttribute("data-name");
+        row.style.display=name.includes(search) ? "block" : "none";
+    });
+}
+
+function openProfile(userId){
+    const u = userById(userId);
+    if(!u) return;
+
+    setUrl("profile", userId);
+    clearActive();
+
+    let actionButtons = `
+        <button onclick="openDm('${u.id}')">direct message</button>
+    `;
+
+    if(u.id === currentUserId){
+        actionButtons = `
+            <button onclick="showAccount(document.getElementById('menuAccount'))">edit account</button>
+        `;
+    }
+
+    let html=`
+        <div class="page-title">profile</div>
+        <div class="page-sub">Member profile and activity.</div>
+
+        <div class="line">
+            <div class="profile-head">
+                ${smallPfp(u)}
+                <div>
+                    <div class="login-card-title">${escapeHtml(u.username)}</div>
+                    <div class="login-card-sub">${u.id === currentUserId ? escapeHtml(u.email) : "member profile"}</div>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="card-label">posts</div>
+                    <div class="card-number">${u.topic_count}</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">files</div>
+                    <div class="card-number">${u.file_count}</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">comments</div>
+                    <div class="card-number">${u.comment_count}</div>
+                </div>
+            </div>
+
+            <div class="topic-title">about</div>
+            <div class="small body-text">${escapeHtml(u.about || "No about text yet.")}</div>
+            <br>
+            ${actionButtons}
+            <button onclick="showUsers(document.getElementById('menuUsers'))">all profiles</button>
+        </div>
+    `;
+
+    fadeChange(html);
+}
+
+function showDMList(button){
+    clickEffect(button);
+    clearActive();
+    if(button) button.classList.add("active");
+
+    setUrl("messages");
+
+    const partners = {};
+
+    dmMessages.forEach(m=>{
+        const other = m.from === currentUserId ? m.to : m.from;
+        if(!partners[other] || m.created > partners[other].created){
+            partners[other] = m;
+        }
+    });
+
+    let html=`
+        <div class="page-title">messages</div>
+        <div class="page-sub">Direct messages with other members.</div>
+        <div class="line">
+    `;
+
+    const ids = Object.keys(partners);
+
+    if(ids.length === 0){
+        html += `<div class="small">No messages yet. Open a profile and start a direct message.</div>`;
+    }
+
+    ids.forEach(id=>{
+        const u = userById(id);
+        if(!u) return;
+
+        const latest = partners[id];
+
+        html += `
+            <div class="dm-row" onclick="openDm('${u.id}')" style="cursor:pointer;">
+                <div style="display:flex;align-items:center;gap:14px;">
+                    ${smallPfp(u)}
+                    <div>
+                        <div class="topic-title">${escapeHtml(u.username)}</div>
+                        <div class="small">${escapeHtml(latest.body).slice(0,100)}</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    html += `
+        </div>
+        <div class="form-box">
+            <button onclick="showUsers(document.getElementById('menuUsers'))">find people</button>
+        </div>
+    `;
+
+    fadeChange(html);
+}
+
+function openDm(otherId){
+    const u = userById(otherId);
+    if(!u) return;
+
+    setUrl("dm", otherId);
+    clearActive();
+    const dmButton=document.getElementById("menuDMs");
+    if(dmButton) dmButton.classList.add("active");
+
+    const convo = dmMessages.filter(m=>{
+        return (m.from === currentUserId && m.to === otherId) || (m.from === otherId && m.to === currentUserId);
+    });
+
+    let html=`
+        <div class="page-title">direct message</div>
+        <div class="page-sub">Chatting with ${nameLink(u.id, u.username)}</div>
+
+        <button onclick="showDMList(document.getElementById('menuDMs'))">back to messages</button>
+        <button onclick="openProfile('${u.id}')">view profile</button>
+        <br><br>
+
+        <div class="line">
+    `;
+
+    if(convo.length === 0){
+        html += `<div class="small">No messages yet. Send the first one.</div><br>`;
+    }
+
+    convo.forEach(m=>{
+        const mine = m.from === currentUserId;
+        html += `
+            <div class="dm-message ${mine ? "me" : "them"}">
+                <div class="comment-meta">${mine ? "you" : escapeHtml(u.username)}</div>
+                <div class="small body-text">${escapeHtml(m.body)}</div>
+            </div>
+        `;
+    });
+
+    html += `
+        </div>
+
+        <div class="form-box">
+            <form action="/send-dm/${u.id}" method="POST">
+                <textarea name="body" placeholder="write message" required></textarea>
+                <br><br>
+                <button class="primary-btn" type="submit">send message</button>
+            </form>
+        </div>
+    `;
+
+    fadeChange(html);
+}
+
 function showAccount(button){
     clickEffect(button);
     clearActive();
@@ -1744,9 +1848,11 @@ function showAccount(button){
 
     setUrl("account");
 
+    const me = userById(currentUserId);
+
     let html=`
         <div class="page-title">account</div>
-        <div class="page-sub">Edit your profile picture, username, password or logout.</div>
+        <div class="page-sub">Edit your profile picture, username, about text, password or logout.</div>
 
         <div class="line">
             <div class="account-box">
@@ -1768,7 +1874,17 @@ function showAccount(button){
                         <br><br>
                         <button class="login-btn primary-btn" type="submit">save profile picture</button>
                     </form>
-                    <div class="small">allowed: png, jpg, jpeg, webp, gif.</div>
+                    <div class="small">allowed: png, jpg, jpeg, webp, gif. maximum size: 3 MB.</div>
+                </div>
+
+                <div class="account-section">
+                    <div class="topic-title">about me</div>
+                    <br>
+                    <form action="/change-about" method="POST">
+                        <textarea name="about" placeholder="write something about yourself">${escapeHtml(me ? (me.about || "") : "")}</textarea>
+                        <br><br>
+                        <button class="login-btn primary-btn" type="submit">save about</button>
+                    </form>
                 </div>
 
                 <div class="account-section">
@@ -1791,9 +1907,7 @@ function showAccount(button){
                 </div>
 
                 <div class="account-section">
-                    <form action="/logout" method="POST">
-                        <button class="login-btn" type="submit">logout</button>
-                    </form>
+                    <a class="login-btn" href="/logout" style="text-decoration:none;">logout</a>
                 </div>
             </div>
         </div>
@@ -1896,6 +2010,14 @@ window.addEventListener("load", ()=>{
             showDiscussion(document.getElementById("menuDiscussion"));
         }else if(startView === "topic" && startTopicId){
             openTopic(startTopicId);
+        }else if(startView === "profile" && startTopicId){
+            openProfile(startTopicId);
+        }else if(startView === "dm" && startTopicId){
+            openDm(startTopicId);
+        }else if(startView === "messages"){
+            showDMList(document.getElementById("menuDMs"));
+        }else if(startView === "profiles"){
+            showUsers(document.getElementById("menuUsers"));
         }else if(startView === "account"){
             showAccount(document.getElementById("menuAccount"));
         }else if(startView === "credits"){
@@ -1914,31 +2036,30 @@ window.addEventListener("load", ()=>{
 """
 
 
-# ============================================================
-# ROUTES
-# ============================================================
-
 @app.route("/")
 def home():
     logged_in = bool(current_email())
     requested_view = request.args.get("view", "")
-    requested_topic = request.args.get("id", "")
+    requested_id = request.args.get("id", "")
 
     if not logged_in:
         auth_mode = "register" if requested_view == "register" else "login"
         requested_view = "login"
-        requested_topic = ""
+        requested_id = ""
 
         return render_template_string(
             HTML,
             files=[],
             topics=[],
+            users=[],
+            dm_messages=[],
             credits=CREDITS,
             user_email=None,
             username="",
+            current_user_id="",
             pfp_url="",
             start_view=requested_view,
-            start_topic_id=requested_topic,
+            start_topic_id=requested_id,
             auth_mode=auth_mode,
             max_file_mb=MAX_FILE_SIZE // (1024 * 1024)
         )
@@ -1949,13 +2070,8 @@ def home():
         requested_view = "dashboard"
 
     allowed_views = {
-        "dashboard",
-        "files",
-        "discussion",
-        "topic",
-        "account",
-        "credits",
-        "notifications"
+        "dashboard", "files", "discussion", "topic", "account", "credits",
+        "notifications", "profile", "profiles", "dm", "messages"
     }
 
     if requested_view not in allowed_views:
@@ -1972,7 +2088,8 @@ def home():
         user = {
             "id": current_user_id(),
             "email": current_email(),
-            "username": current_email()
+            "username": current_email(),
+            "about": ""
         }
 
     if not user:
@@ -1986,16 +2103,25 @@ def home():
     topics = [public_topic(topic_data, db) for topic_data in db["topics"].values()]
     topics.sort(key=lambda x: x["created"], reverse=True)
 
+    public_users = [
+        public_user(user_data, db, store, current_user_id())
+        for user_data in db["users"].values()
+    ]
+    public_users.sort(key=lambda x: x["username"].lower())
+
     return render_template_string(
         HTML,
         files=files,
         topics=topics,
+        users=public_users,
+        dm_messages=public_dm_messages(db, current_user_id()),
         credits=CREDITS,
         user_email=user.get("email", ""),
         username=user.get("username", user.get("email", "")),
+        current_user_id=user.get("id", ""),
         pfp_url=pfp_url_from_user(user, store),
         start_view=requested_view,
-        start_topic_id=requested_topic,
+        start_topic_id=requested_id,
         auth_mode=auth_mode,
         max_file_mb=MAX_FILE_SIZE // (1024 * 1024)
     )
@@ -2044,6 +2170,7 @@ def register():
         "password_hash": generate_password_hash(password),
         "pfp_id": "",
         "pfp_updated": 0,
+        "about": "",
         "created": int(time.time())
     }
 
@@ -2088,12 +2215,12 @@ def login():
     return go("dashboard")
 
 
-@app.route("/logout", methods=["POST"])
-@login_required
+@app.route("/logout", methods=["GET", "POST"])
 def logout():
     session.clear()
-    flash("Logged out.", "success")
-    return redirect(url_for("home", view="login"))
+    response = redirect(url_for("home", view="login"))
+    response.set_cookie("session", "", expires=0)
+    return response
 
 
 @app.route("/change-username", methods=["POST"])
@@ -2101,7 +2228,6 @@ def logout():
 def change_username():
     store = load_store()
     db = store["db"]
-
     user = db["users"].get(current_user_id())
 
     if not user:
@@ -2137,12 +2263,39 @@ def change_username():
     return go("account")
 
 
+@app.route("/change-about", methods=["POST"])
+@login_required
+def change_about():
+    store = load_store()
+    db = store["db"]
+    user = db["users"].get(current_user_id())
+
+    if not user:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
+    about = request.form.get("about", "").strip()
+
+    user["about"] = about[:500]
+    user["updated_at"] = int(time.time())
+    db["users"][user["id"]] = user
+
+    try:
+        save_db(db)
+    except Exception as e:
+        flash(f"Could not update about text: {e}", "error")
+        return go("account")
+
+    flash("About text changed successfully.", "success")
+    return go("account")
+
+
 @app.route("/change-password", methods=["POST"])
 @login_required
 def change_password():
     store = load_store()
     db = store["db"]
-
     user = db["users"].get(current_user_id())
 
     if not user:
@@ -2180,7 +2333,6 @@ def change_password():
 def change_pfp():
     store = load_store()
     db = store["db"]
-
     user = db["users"].get(current_user_id())
 
     if not user:
@@ -2247,7 +2399,6 @@ def change_pfp():
 def upload():
     store = load_store()
     db = store["db"]
-
     user = db["users"].get(current_user_id())
 
     if not user:
@@ -2387,10 +2538,7 @@ def profile_picture(user_id):
 
     content_type = response.headers.get("Content-Type", "image/png")
 
-    return send_file(
-        BytesIO(response.content),
-        mimetype=content_type
-    )
+    return send_file(BytesIO(response.content), mimetype=content_type)
 
 
 @app.route("/topic", methods=["POST"])
@@ -2398,7 +2546,6 @@ def profile_picture(user_id):
 def add_topic():
     store = load_store()
     db = store["db"]
-
     user = db["users"].get(current_user_id())
 
     if not user:
@@ -2441,7 +2588,6 @@ def add_topic():
 def add_comment(topic_id):
     store = load_store()
     db = store["db"]
-
     user = db["users"].get(current_user_id())
 
     if not user:
@@ -2487,7 +2633,6 @@ def add_comment(topic_id):
 def delete_topic_route(topic_id):
     store = load_store()
     db = store["db"]
-
     user = db["users"].get(current_user_id())
     topic = db["topics"].get(topic_id)
 
@@ -2520,6 +2665,55 @@ def delete_topic_route(topic_id):
     return go("discussion")
 
 
+@app.route("/send-dm/<target_id>", methods=["POST"])
+@login_required
+def send_dm(target_id):
+    store = load_store()
+    db = store["db"]
+
+    sender = db["users"].get(current_user_id())
+    target = db["users"].get(target_id)
+
+    if not sender:
+        session.clear()
+        flash("Account not found.", "error")
+        return redirect(url_for("home", view="login"))
+
+    if not target:
+        flash("User not found.", "error")
+        return go("messages")
+
+    if sender.get("id") == target.get("id"):
+        flash("You cannot message yourself.", "error")
+        return go("profile", target_id)
+
+    body = request.form.get("body", "").strip()
+
+    if not body:
+        flash("Message cannot be empty.", "error")
+        return go("dm", target_id)
+
+    dm_id = secrets.token_hex(12)
+
+    db["dms"][dm_id] = {
+        "id": dm_id,
+        "from": sender.get("id"),
+        "to": target.get("id"),
+        "body": body[:1000],
+        "created": int(time.time()),
+        "read": False
+    }
+
+    try:
+        save_db(db)
+    except Exception as e:
+        flash(f"Could not send message: {e}", "error")
+        return go("dm", target_id)
+
+    flash("Message sent.", "success")
+    return go("dm", target_id)
+
+
 @app.route("/discord-test")
 def discord_test():
     try:
@@ -2536,6 +2730,7 @@ def discord_test():
             f"Topics: {len(db['topics'])}<br>"
             f"Comments: {len(db['comments'])}<br>"
             f"Files: {len(db['files'])}<br>"
+            f"DMs: {len(db['dms'])}<br>"
             "Test message sent."
         )
     except Exception as e:
