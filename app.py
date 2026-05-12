@@ -40,7 +40,8 @@ COMMENT_COOLDOWN_SECONDS = int(os.environ.get("COMMENT_COOLDOWN_SECONDS", "8"))
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
-ALLOWED_EXTENSIONS = {".zip", ".mp3"}
+ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+ALLOWED_EXTENSIONS = {".zip", ".mp3"} | ALLOWED_IMAGE_EXTENSIONS
 ALLOWED_PFP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 DANGEROUS_ZIP_EXTENSIONS = {
@@ -88,10 +89,11 @@ def now_ms():
 
 def blank_db():
     return {
-        "version": 12,
+        "version": 13,
         "users": {},
         "topics": {},
         "comments": {},
+        "file_comments": {},
         "files": {},
         "dms": {},
         "created_at": now_ms(),
@@ -106,11 +108,11 @@ def normalize_db(db):
     clean = blank_db()
     clean.update(db)
 
-    for key in ["users", "topics", "comments", "files", "dms"]:
+    for key in ["users", "topics", "comments", "file_comments", "files", "dms"]:
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 12
+    clean["version"] = 13
     clean.setdefault("created_at", now_ms())
     clean.setdefault("updated_at", now_ms())
     return clean
@@ -269,7 +271,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v12|{int(time.time())}",
+        content=f"SWDBSNAP|v13|{int(time.time())}",
         filename="smartweb-db.json",
         file_bytes=raw,
         content_type="application/json",
@@ -487,7 +489,12 @@ def scan_uploaded_file(filename, file_bytes):
 
         return True, "ZIP passed basic safety check."
 
-    return False, "Only ZIP and MP3 files are allowed."
+    if ext in ALLOWED_IMAGE_EXTENSIONS:
+        if not looks_like_image(filename, file_bytes):
+            return False, "This does not look like a real image file."
+        return True, "Image passed basic safety check."
+
+    return False, "Only ZIP, MP3, PNG, JPG, JPEG, WEBP and GIF files are allowed."
 
 
 def scan_profile_picture(filename, file_bytes):
@@ -608,9 +615,19 @@ def go(view="dashboard", item_id=None):
 
 
 def public_file(file_data, db=None):
+    if db is None:
+        db = load_store()["db"]
+
     name = file_data.get("original_name", "file")
     ext = os.path.splitext(name.lower())[1]
     file_id = file_data.get("id", "")
+    viewer_id = current_user_id()
+
+    file_comments = [c for c in db.get("file_comments", {}).values() if c.get("file_id") == file_id]
+    file_comments.sort(key=lambda c: int(c.get("created", 0)))
+
+    is_audio = ext == ".mp3"
+    is_image = ext in ALLOWED_IMAGE_EXTENSIONS
 
     return {
         "id": file_id,
@@ -619,10 +636,22 @@ def public_file(file_data, db=None):
         "author": username_from_id(file_data.get("author_id", ""), db, file_data.get("author", "unknown")),
         "author_id": file_data.get("author_id", ""),
         "created": int(file_data.get("created", 0)),
-        "is_audio": ext == ".mp3",
-        "stream_url": url_for("stream_file", file_id=file_id) if ext == ".mp3" else "",
+        "is_audio": is_audio,
+        "is_image": is_image,
+        "stream_url": url_for("stream_file", file_id=file_id) if is_audio else "",
+        "preview_url": url_for("preview_file", file_id=file_id) if is_image else "",
+        "can_delete": viewer_id == file_data.get("author_id", ""),
+        "comments": [
+            {
+                "id": c.get("id", ""),
+                "body": c.get("body", ""),
+                "author": username_from_id(c.get("author_id", ""), db, c.get("author", "unknown")),
+                "author_id": c.get("author_id", ""),
+                "created": int(c.get("created", 0)),
+            }
+            for c in file_comments
+        ],
     }
-
 
 def public_topic(topic_data, db=None):
     if db is None:
@@ -666,7 +695,7 @@ def public_user(user, db, store, viewer_id):
         "joined": int(user.get("created", 0)),
         "pfp_url": pfp_url_from_user(user, store),
         "topic_count": len([t for t in db["topics"].values() if t.get("author_id") == uid]),
-        "comment_count": len([c for c in db["comments"].values() if c.get("author_id") == uid]),
+        "comment_count": len([c for c in db["comments"].values() if c.get("author_id") == uid]) + len([c for c in db.get("file_comments", {}).values() if c.get("author_id") == uid]),
         "file_count": len([f for f in db["files"].values() if f.get("author_id") == uid]),
     }
 
@@ -726,6 +755,28 @@ def public_notifications(db, current_id):
                     "body": topic.get("title", "discussion"),
                     "from_id": commenter_id,
                     "target_id": comment.get("topic_id", ""),
+                    "created": created,
+                    "unread": created > last_seen,
+                })
+
+    my_file_ids = {file_id for file_id, file_data in db["files"].items() if file_data.get("author_id") == current_id}
+
+    for comment in db.get("file_comments", {}).values():
+        created = int(comment.get("created", 0))
+        commenter_id = comment.get("author_id", "")
+
+        if comment.get("file_id") in my_file_ids and commenter_id != current_id:
+            commenter = db["users"].get(commenter_id, {})
+            file_data = db["files"].get(comment.get("file_id", ""), {})
+
+            if commenter:
+                items.append({
+                    "id": comment.get("id", ""),
+                    "type": "file_comment",
+                    "title": f"{commenter.get('username', 'unknown')} commented on your file",
+                    "body": file_data.get("original_name", "file"),
+                    "from_id": commenter_id,
+                    "target_id": comment.get("file_id", ""),
                     "created": created,
                     "unread": created > last_seen,
                 })
@@ -942,6 +993,8 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 .audio-controls .audio-btn:hover{background:transparent!important;border:none!important;color:var(--blue)}
 .audio-range{flex:1;height:3px;padding:0;cursor:pointer;accent-color:var(--blue);background:transparent;border:none}
 .audio-time{min-width:82px;text-align:right;color:var(--muted);font-size:12px;font-weight:900}
+.file-preview-img{display:block;max-width:360px;max-height:260px;object-fit:contain;margin:14px 0;border:1px solid var(--line);background:rgba(255,255,255,.03)}
+.file-preview-img.big{max-width:720px;max-height:520px}
 .live-dot{display:inline-block;width:7px;height:7px;background:var(--good);margin-left:8px}
 .login-only{height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}
 .login-shell{width:390px;background:transparent;border-left:1px solid var(--line);border-right:1px solid var(--line);padding:32px}
@@ -1209,6 +1262,12 @@ function audioPlayerHtml(file){
     `;
 }
 
+function filePreviewHtml(file, big=false){
+    if(!file.is_image) return "";
+    const cls = big ? "file-preview-img big" : "file-preview-img";
+    return `<img class="${cls}" src="${escapeAttr(file.preview_url)}" alt="${escapeAttr(file.name)}">`;
+}
+
 function bindAudioPlayers(){
     document.querySelectorAll("[data-audio-player]").forEach(player=>{
         if(player.dataset.bound === "1") return;
@@ -1281,8 +1340,10 @@ function showDashboard(button){
         html += `
             <div class="file-row">
                 <div class="file-title">${escapeHtml(file.name)}</div>
-                <div class="meta">new file · ${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)}</div>
+                <div class="meta">new file · ${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)} · ${file.comments.length} comments</div>
+                ${filePreviewHtml(file)}
                 <a class="file-link" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
+                <span class="topic-open" onclick="openFile('${file.id}')" style="margin-left:12px;">open file post</span>
                 ${audioPlayerHtml(file)}
             </div>
         `;
@@ -1319,7 +1380,7 @@ function showFiles(button){
 
     let html=`
         <div class="page-title">files</div>
-        <div class="page-sub">Upload ZIP packs or MP3 previews. MP3 files can be played directly here.</div>
+        <div class="page-sub">Upload ZIP packs, MP3 previews, or image posts. Images show directly in the files feed.</div>
         <input id="searchInput" class="search-bar" placeholder="search files" oninput="filterFiles()">
         <div class="line">
     `;
@@ -1330,8 +1391,10 @@ function showFiles(button){
         html+=`
             <div class="file-row" data-name="${escapeAttr((file.name + ' ' + file.author).toLowerCase())}">
                 <div class="file-title">${escapeHtml(file.name)}</div>
-                <div class="meta">${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)}</div>
+                <div class="meta">${escapeHtml(file.size)} · by ${nameLink(file.author_id, file.author)} · ${file.comments.length} comments</div>
+                ${filePreviewHtml(file)}
                 <a class="file-link" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
+                <span class="topic-open" onclick="openFile('${file.id}')" style="margin-left:12px;">open file post</span>
                 ${audioPlayerHtml(file)}
             </div>
         `;
@@ -1341,13 +1404,13 @@ function showFiles(button){
         </div>
         <div class="form-box">
             <form action="/upload" method="POST" enctype="multipart/form-data">
-                <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3" required hidden>
-                <label for="fileInput" class="file-button">select zip or mp3</label>
+                <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3,.png,.jpg,.jpeg,.webp,.gif" required hidden>
+                <label for="fileInput" class="file-button">select file</label>
                 <span id="fileName" class="selected-file">no file selected</span>
                 <br><br>
                 <button class="primary-btn" type="submit">upload file</button>
             </form>
-            <p class="small">allowed: zip and mp3 only. maximum size: ${maxFileMb} MB.</p>
+            <p class="small">allowed: zip, mp3, png, jpg, jpeg, webp, gif. maximum size: ${maxFileMb} MB.</p>
         </div>
     `;
 
@@ -1362,6 +1425,54 @@ function filterFiles(){
         const name=row.getAttribute("data-name");
         row.style.display=name.includes(search) ? "block" : "none";
     });
+}
+
+function openFile(fileId){
+    const file = files.find(f=>f.id===fileId);
+    if(!file) return;
+
+    setUrl("file", fileId);
+    clearActive();
+    const filesButton=document.getElementById("menuFiles");
+    if(filesButton) filesButton.classList.add("active");
+
+    let html=`
+        <div class="page-title">${escapeHtml(file.name)}</div>
+        <div class="page-sub">by ${nameLink(file.author_id, file.author)} · ${escapeHtml(file.size)}</div>
+        <button onclick="showFiles(document.getElementById('menuFiles'))">back to files</button>
+        <a class="btn" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
+        <br><br>
+        <div class="line">
+            ${filePreviewHtml(file, true)}
+            ${audioPlayerHtml(file)}
+            <br>
+            <div class="topic-title">comments</div>
+    `;
+
+    if(file.comments.length===0){ html+=`<div class="small">no comments yet.</div>`; }
+
+    file.comments.forEach(comment=>{
+        html+=`
+            <div class="comment-row">
+                <div class="comment-meta">${nameLink(comment.author_id, comment.author)}</div>
+                <div class="small body-text">${escapeHtml(comment.body)}</div>
+            </div>
+        `;
+    });
+
+    html+=`
+        </div>
+        <div class="form-box">
+            <form action="/file-comment/${file.id}" method="POST">
+                <textarea name="body" placeholder="write comment" required></textarea>
+                <br><br>
+                <button class="primary-btn" type="submit">add comment</button>
+            </form>
+            <p class="small">comment cooldown: ${COMMENT_COOLDOWN_TEXT}</p>
+        </div>
+    `;
+
+    fadeChange(html);
 }
 
 function showDiscussion(button){
@@ -1755,7 +1866,9 @@ function showNotifications(button){
         }else if(n.type === "topic"){
             action = `<div class="topic-open" onclick="openTopic('${n.target_id}')">open post</div>`;
         }else if(n.type === "file"){
-            action = `<div class="topic-open" onclick="showFiles(document.getElementById('menuFiles'))">open files</div>`;
+            action = `<div class="topic-open" onclick="openFile('${n.target_id}')">open file</div>`;
+        }else if(n.type === "file_comment"){
+            action = `<div class="topic-open" onclick="openFile('${n.target_id}')">open file</div>`;
         }
 
         html += `
@@ -1828,6 +1941,8 @@ function rerenderCurrentView(){
 
     if(currentView === "files"){
         showFiles(document.getElementById("menuFiles"));
+    }else if(currentView === "file" && currentViewId){
+        openFile(currentViewId);
     }else if(currentView === "discussion"){
         showDiscussion(document.getElementById("menuDiscussion"));
     }else if(currentView === "topic" && currentViewId){
@@ -1904,6 +2019,8 @@ function startApp(){
     try{
         if(startView === "files"){
             showFiles(document.getElementById("menuFiles"));
+        }else if(startView === "file" && startTopicId){
+            openFile(startTopicId);
         }else if(startView === "discussion"){
             showDiscussion(document.getElementById("menuDiscussion"));
         }else if(startView === "topic" && startTopicId){
@@ -1991,7 +2108,7 @@ def home():
         requested_view = "dashboard"
 
     allowed_views = {
-        "dashboard", "files", "discussion", "topic", "account", "credits",
+        "dashboard", "files", "file", "discussion", "topic", "account", "credits",
         "notifications", "profile", "profiles", "dm", "messages",
     }
 
@@ -2327,10 +2444,16 @@ def upload():
         return go("files")
 
     if not allowed_file(uploaded.filename):
-        flash("Only ZIP and MP3 files are allowed.", "error")
+        flash("Only ZIP, MP3, PNG, JPG, JPEG, WEBP and GIF files are allowed.", "error")
         return go("files")
 
     original_name = secure_filename(uploaded.filename)
+
+    for existing_file in db["files"].values():
+        if existing_file.get("original_name", "").lower() == original_name.lower():
+            flash("A file with this name already exists. Rename it before uploading.", "error")
+            return go("files")
+
     file_bytes = uploaded.read()
     size = len(file_bytes)
 
@@ -2370,6 +2493,7 @@ def upload():
         "original_name": original_name,
         "size": size,
         "content_type": uploaded.content_type or "application/octet-stream",
+        "kind": "image" if os.path.splitext(original_name.lower())[1] in ALLOWED_IMAGE_EXTENSIONS else ("audio" if original_name.lower().endswith(".mp3") else "zip"),
         "author": user.get("username"),
         "author_id": user.get("id"),
         "created": int(time.time()),
@@ -2456,6 +2580,42 @@ def stream_file(file_id):
         as_attachment=False,
         download_name=file_data.get("original_name", "audio.mp3"),
     )
+
+
+@app.route("/preview/<file_id>")
+@login_required
+def preview_file(file_id):
+    try:
+        store = load_store(force=True)
+        db = store["db"]
+        file_urls = store["file_urls"]
+    except Exception:
+        abort(404)
+
+    file_data = db["files"].get(file_id)
+    if not file_data:
+        abort(404)
+
+    original_name = file_data.get("original_name", "")
+    if os.path.splitext(original_name.lower())[1] not in ALLOWED_IMAGE_EXTENSIONS:
+        abort(404)
+
+    file_url = file_urls.get(file_id, {}).get("url")
+    if not file_url:
+        abort(404)
+
+    try:
+        response = requests.get(file_url, timeout=60)
+        response.raise_for_status()
+    except Exception:
+        abort(404)
+
+    content_type = response.headers.get("Content-Type", file_data.get("content_type", "image/png"))
+    out = send_file(BytesIO(response.content), mimetype=content_type, as_attachment=False, download_name=original_name or "image.png")
+    out.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    out.headers["Pragma"] = "no-cache"
+    out.headers["Expires"] = "0"
+    return out
 
 
 @app.route("/pfp/<user_id>")
@@ -2580,6 +2740,51 @@ def add_comment(topic_id):
 
     flash("Comment added.", "success")
     return go("topic", topic_id)
+
+
+@app.route("/file-comment/<file_id>", methods=["POST"])
+@login_required
+def add_file_comment(file_id):
+    store = load_store(force=True)
+    db = store["db"]
+    user = db["users"].get(current_user_id())
+
+    if file_id not in db["files"]:
+        flash("File not found.", "error")
+        return go("files")
+
+    left = cooldown_left(user, "last_comment_at", COMMENT_COOLDOWN_SECONDS)
+    if left > 0:
+        flash(f"Slow down. You can comment again in {left} seconds.", "error")
+        return go("file", file_id)
+
+    body = request.form.get("body", "").strip()
+    if not body:
+        flash("Comment cannot be empty.", "error")
+        return go("file", file_id)
+
+    comment_id = secrets.token_hex(12)
+    comment = {
+        "id": comment_id,
+        "file_id": file_id,
+        "body": body[:900],
+        "author": user.get("username"),
+        "author_id": user.get("id"),
+        "created": int(time.time()),
+    }
+
+    db.setdefault("file_comments", {})[comment_id] = comment
+    user["last_comment_at"] = int(time.time())
+    db["users"][user["id"]] = user
+
+    try:
+        save_db(db)
+    except Exception as e:
+        flash(f"Could not save file comment to Discord DB: {e}", "error")
+        return go("file", file_id)
+
+    flash("Comment added.", "success")
+    return go("file", file_id)
 
 
 @app.route("/delete-topic/<topic_id>", methods=["POST"])
