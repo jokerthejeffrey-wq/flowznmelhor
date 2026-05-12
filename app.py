@@ -567,6 +567,63 @@ def user_id_from_email(email):
 def file_ext(filename):
     return os.path.splitext(filename.lower())[1]
 
+def sha256_bytes(file_bytes):
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def wav_audio_hash(file_bytes):
+    """
+    Basic WAV audio-content hash.
+    It ignores some headers/metadata by hashing the data chunk only.
+    """
+    try:
+        marker = b"data"
+        index = file_bytes.find(marker)
+
+        if index == -1:
+            return ""
+
+        size_start = index + 4
+        data_start = index + 8
+
+        if len(file_bytes) < data_start:
+            return ""
+
+        data_size = int.from_bytes(file_bytes[size_start:data_start], "little", signed=False)
+        audio_data = file_bytes[data_start:data_start + data_size]
+
+        if not audio_data:
+            return ""
+
+        return hashlib.sha256(audio_data).hexdigest()
+
+    except Exception:
+        return ""
+
+
+def duplicate_file_check(db, original_name, file_bytes):
+    new_name = original_name.strip().lower()
+    new_file_hash = sha256_bytes(file_bytes)
+    new_ext = file_ext(original_name)
+    new_audio_hash = ""
+
+    if new_ext == ".wav":
+        new_audio_hash = wav_audio_hash(file_bytes)
+
+    for old_file in db["files"].values():
+        old_name = old_file.get("original_name", "").strip().lower()
+
+        if old_name == new_name:
+            return False, "A file with this same name already exists."
+
+        if old_file.get("file_hash") == new_file_hash:
+            return False, "This exact same file was already uploaded."
+
+        if new_audio_hash and old_file.get("audio_hash") == new_audio_hash:
+            return False, "This same WAV audio was already uploaded."
+
+    return True, "No duplicate found."
+
 
 def allowed_file(filename):
     return file_ext(filename) in ALLOWED_EXTENSIONS
@@ -2483,6 +2540,12 @@ def upload():
         flash(f"Upload blocked: {reason}", "error")
         return go("files")
 
+    unique, duplicate_reason = duplicate_file_check(db, original_name, file_bytes)
+
+    if not unique:
+        flash(duplicate_reason, "error")
+        return go("files")
+
     file_id = secrets.token_hex(12)
 
     try:
@@ -2501,11 +2564,13 @@ def upload():
         "original_name": original_name,
         "size": size,
         "content_type": uploaded.content_type or mime_for_name(original_name),
+        "file_hash": sha256_bytes(file_bytes),
+        "audio_hash": wav_audio_hash(file_bytes) if file_ext(original_name) == ".wav" else "",
         "author": user.get("username"),
         "author_id": user.get("id"),
         "created": int(time.time()),
     }
-
+    
     db["files"][file_id] = metadata
 
     try:
