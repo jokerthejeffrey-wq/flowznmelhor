@@ -121,7 +121,7 @@ for _email in os.environ.get("EXTRA_BLOCKED_EMAIL_ADDRESSES", "").split(","):
 
 # Speed settings. The old version scanned your whole Discord DB channel very often.
 # This version only grabs the latest DB snapshot for normal page loads.
-CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "60"))
+CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "180"))
 FAST_BOOT_MESSAGE_PAGES = int(os.environ.get("FAST_BOOT_MESSAGE_PAGES", "3"))
 ATTACHMENT_CACHE_SECONDS = int(os.environ.get("ATTACHMENT_CACHE_SECONDS", "1800"))
 LIVE_POLL_MS = int(os.environ.get("LIVE_POLL_MS", "30000"))
@@ -607,13 +607,13 @@ def load_store(force=False):
                 pass
 
     db = normalize_db(db)
-    purged_blocked_accounts = purge_blocked_email_accounts(db)
-    if purged_blocked_accounts:
-        try:
-            # Save a clean snapshot so blocked accounts stay deleted.
-            save_db(db)
-        except Exception:
-            pass
+
+    # IMPORTANT SPEED/SPAM FIX:
+    # Normal page loads and live updates must NEVER write a new DB snapshot to Discord.
+    # The old version auto-purged blocked emails inside load_store(), so simply opening
+    # the website could create repeated SWDBSNAP messages. Purging is now only done
+    # on real write actions, login/register of a blocked user, or the manual purge URL.
+    purged_blocked_accounts = []
 
     store = {
         "db": db,
@@ -642,7 +642,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large even after gzip compression. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v15|gz|{int(time.time())}",
+        content=f"SWDBSNAP|v16quiet|gz|{int(time.time())}",
         filename="smartweb-db.json.gz",
         file_bytes=raw,
         content_type="application/gzip",
@@ -1235,7 +1235,13 @@ def public_dm_messages(db, current_id):
 
 def public_notifications(db, current_id):
     user = db["users"].get(current_id, {})
-    last_seen = int(user.get("last_seen_notifications", 0))
+    # Read status is session-based to avoid saving a new Discord DB snapshot every time
+    # someone opens the notifications page.
+    try:
+        session_seen = int(session.get("notifications_seen_at", 0) or 0)
+    except Exception:
+        session_seen = 0
+    last_seen = max(int(user.get("last_seen_notifications", 0)), session_seen)
     items = []
 
     for dm in db["dms"].values():
@@ -1339,7 +1345,7 @@ def build_client_state(db, store, user):
 
     visible_users = {
         uid: data for uid, data in db["users"].items()
-        if isinstance(data, dict) and data.get("email")
+        if isinstance(data, dict) and data.get("email") and not blocked_email_reason(data.get("email", ""))
     }
 
     visible_db = dict(db)
@@ -1373,7 +1379,7 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>FunkFile</title>
+<title>producer-room</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
@@ -1547,7 +1553,7 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 
 <div class="login-only">
     <div class="login-shell">
-        <div class="login-logo">FUNKFILE</div>
+        <div class="login-logo">PRODUCER-ROOM</div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -1601,7 +1607,7 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 
 <div class="app">
     <div class="side">
-        <div class="title">FUNKFILE</div>
+        <div class="title">PRODUCER-ROOM</div>
 
         <div class="user-mini" onclick="showAccount(document.getElementById('menuAccount'))" style="cursor:pointer;">
             <div class="pfp-box">
@@ -2489,6 +2495,7 @@ function rerenderCurrentView(){
 
 async function checkForUpdates(){
     if(!userEmail) return;
+    if(document.hidden) return;
 
     try{
         const res = await fetch("/live-state?t=" + Date.now(), {cache:"no-store"});
@@ -2517,7 +2524,7 @@ async function checkForUpdates(){
     }
 }
 
-setInterval(checkForUpdates, 30000);
+setInterval(checkForUpdates, 60000);
 
 function escapeHtml(text){
     return String(text)
@@ -3514,10 +3521,11 @@ def live_state():
 
         blocked_reason = blocked_email_reason(user.get("email", current_email()))
         if blocked_reason:
-            delete_user_and_content(db, user.get("id") or current_user_id())
-            save_db(db)
+            # Do not save DB from live-state. live-state runs automatically in the browser,
+            # so writing here can spam Discord. The account will be deleted on login/register
+            # or by opening /purge-blocked-emails once.
             session.clear()
-            return jsonify({"ok": False, "error": "This email is blocked. Account deleted."}), 401
+            return jsonify({"ok": False, "error": "This email is blocked. Please log in again."}), 401
 
         state = build_client_state(db, store, user)
         state["ok"] = True
@@ -3530,30 +3538,11 @@ def live_state():
 @app.route("/notifications-read", methods=["POST"])
 @login_required
 def notifications_read():
-    try:
-        store = load_store(force=True)
-        db = store["db"]
-        user = db["users"].get(current_user_id())
-
-        if not user:
-            return jsonify({"ok": False, "error": "Account not found"}), 401
-
-        now_ts = int(time.time())
-        last_seen = int(user.get("last_seen_notifications", 0))
-
-        if now_ts - last_seen < NOTIFICATION_SAVE_COOLDOWN_SECONDS:
-            return jsonify({"ok": True, "skipped_save": True})
-
-        user["last_seen_notifications"] = now_ts
-        user["updated_at"] = now_ts
-        db["users"][user["id"]] = user
-        save_db(db)
-
-        return jsonify({"ok": True})
-
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
+    # IMPORTANT SPEED/SPAM FIX:
+    # This route is clicked automatically when the notifications page opens.
+    # Do NOT save a new DB snapshot to Discord here. Store read-time in the Flask session only.
+    session["notifications_seen_at"] = int(time.time())
+    return jsonify({"ok": True, "session_only": True})
 
 @app.route("/purge-blocked-emails")
 def purge_blocked_emails_route():
@@ -3584,7 +3573,10 @@ def discord_test():
         store = load_store(force=True)
         db = store["db"]
 
-        post_discord_text(f"SWTEST|website connected|{int(time.time())}")
+        sent_test = False
+        if request.args.get("send") == "1":
+            post_discord_text(f"SWTEST|website connected|{int(time.time())}")
+            sent_test = True
 
         account_count = len([u for u in db["users"].values() if isinstance(u, dict) and u.get("email")])
 
@@ -3597,7 +3589,8 @@ def discord_test():
             f"Comments: {len(db['comments'])}<br>"
             f"Files: {len(db['files'])}<br>"
             f"DMs: {len(db['dms'])}<br>"
-            "Test message sent."
+            f"Test message sent: {sent_test}<br>"
+            "Add ?send=1 to /discord-test only when you really want to send a test Discord message."
         )
 
     except Exception as e:
