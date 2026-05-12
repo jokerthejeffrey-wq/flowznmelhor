@@ -32,7 +32,7 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 DISCORD_DB_CHANNEL_ID = os.environ.get("DISCORD_DB_CHANNEL_ID", "").strip()
 DISCORD_API = "https://discord.com/api/v10"
 
-MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", str(12 * 1024 * 1024)))
+MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", str(8 * 1024 * 1024 * 1024)))
 MAX_DB_SIZE = int(os.environ.get("MAX_DB_SIZE", str(7 * 1024 * 1024)))
 
 POST_COOLDOWN_SECONDS = int(os.environ.get("POST_COOLDOWN_SECONDS", "25"))
