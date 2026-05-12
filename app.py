@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import gzip
 import time
 import hashlib
 import secrets
@@ -24,6 +25,12 @@ from flask import (
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
+try:
+    from PIL import Image, ImageOps
+except Exception:
+    Image = None
+    ImageOps = None
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(64))
@@ -37,6 +44,14 @@ MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", str(8 * 1024 * 1024)))
 MAX_DB_SIZE = int(os.environ.get("MAX_DB_SIZE", str(7 * 1024 * 1024)))
 POST_COOLDOWN_SECONDS = int(os.environ.get("POST_COOLDOWN_SECONDS", "30"))
 COMMENT_COOLDOWN_SECONDS = int(os.environ.get("COMMENT_COOLDOWN_SECONDS", "8"))
+UPLOAD_COOLDOWN_SECONDS = int(os.environ.get("UPLOAD_COOLDOWN_SECONDS", "60"))
+PROFILE_CHANGE_COOLDOWN_SECONDS = int(os.environ.get("PROFILE_CHANGE_COOLDOWN_SECONDS", "600"))
+PASSWORD_CHANGE_COOLDOWN_SECONDS = int(os.environ.get("PASSWORD_CHANGE_COOLDOWN_SECONDS", "600"))
+USERNAME_COOLDOWN_SECONDS = int(os.environ.get("USERNAME_COOLDOWN_SECONDS", str(5 * 24 * 60 * 60)))
+NOTIFICATION_SAVE_COOLDOWN_SECONDS = int(os.environ.get("NOTIFICATION_SAVE_COOLDOWN_SECONDS", "60"))
+IMAGE_RESIZE_FACTOR = float(os.environ.get("IMAGE_RESIZE_FACTOR", "0.95"))
+IMAGE_JPEG_QUALITY = int(os.environ.get("IMAGE_JPEG_QUALITY", "92"))
+IMAGE_WEBP_QUALITY = int(os.environ.get("IMAGE_WEBP_QUALITY", "90"))
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
@@ -75,10 +90,10 @@ BLOCKED_EMAIL_DOMAINS = {
 
 # Speed settings. The old version scanned your whole Discord DB channel very often.
 # This version only grabs the latest DB snapshot for normal page loads.
-CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "30"))
+CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "60"))
 FAST_BOOT_MESSAGE_PAGES = int(os.environ.get("FAST_BOOT_MESSAGE_PAGES", "3"))
 ATTACHMENT_CACHE_SECONDS = int(os.environ.get("ATTACHMENT_CACHE_SECONDS", "1800"))
-LIVE_POLL_MS = int(os.environ.get("LIVE_POLL_MS", "15000"))
+LIVE_POLL_MS = int(os.environ.get("LIVE_POLL_MS", "30000"))
 
 CACHE = {"time": 0, "store": None}
 ATTACHMENT_CACHE = {"items": {}}
@@ -96,7 +111,7 @@ def now_ms():
 
 def blank_db():
     return {
-        "version": 13,
+        "version": 14,
         "users": {},
         "topics": {},
         "comments": {},
@@ -119,7 +134,7 @@ def normalize_db(db):
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 13
+    clean["version"] = 14
     clean.setdefault("created_at", now_ms())
     clean.setdefault("updated_at", now_ms())
     return clean
@@ -181,6 +196,130 @@ def best_attachment_url(info):
     if not info:
         return ""
     return info.get("url") or info.get("proxy_url") or ""
+
+
+def load_db_snapshot_bytes(raw, filename=""):
+    """
+    Supports both old plain JSON snapshots and new gzip-compressed snapshots.
+    New saves use smartweb-db.json.gz to send less data to Discord.
+    """
+    if not raw:
+        return blank_db()
+
+    filename = (filename or "").lower()
+
+    try:
+        if filename.endswith(".gz") or raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+
+        return normalize_db(json.loads(raw.decode("utf-8")))
+    except Exception:
+        return blank_db()
+
+
+def format_cooldown(seconds):
+    seconds = max(0, int(seconds))
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+
+    if days > 0:
+        return f"{days}d {hours}h"
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
+def image_content_type(filename, fallback="image/png"):
+    ext = os.path.splitext((filename or "").lower())[1]
+    if ext in [".jpg", ".jpeg"]:
+        return "image/jpeg"
+    if ext == ".webp":
+        return "image/webp"
+    if ext == ".gif":
+        return "image/gif"
+    if ext == ".png":
+        return "image/png"
+    return fallback or "application/octet-stream"
+
+
+def compress_image_for_discord(filename, file_bytes, content_type=""):
+    """
+    Light image compression for Discord storage.
+    It resizes normal images to 95% width/height, which is about 10% less pixel data,
+    then saves with optimization. Animated GIFs are kept unchanged to avoid breaking them.
+    """
+    info = {
+        "compressed": False,
+        "original_size": len(file_bytes or b""),
+        "compressed_size": len(file_bytes or b""),
+        "saved_bytes": 0,
+    }
+
+    ext = os.path.splitext((filename or "").lower())[1]
+
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        return file_bytes, content_type or "application/octet-stream", info
+
+    if Image is None or ImageOps is None:
+        return file_bytes, content_type or image_content_type(filename), info
+
+    if ext == ".gif":
+        # Keep GIFs untouched so animated profile pictures / posts do not break.
+        return file_bytes, content_type or "image/gif", info
+
+    try:
+        with Image.open(BytesIO(file_bytes)) as img:
+            if getattr(img, "is_animated", False):
+                return file_bytes, content_type or image_content_type(filename), info
+
+            img = ImageOps.exif_transpose(img)
+            width, height = img.size
+
+            if width < 64 or height < 64:
+                return file_bytes, content_type or image_content_type(filename), info
+
+            factor = max(0.50, min(1.0, IMAGE_RESIZE_FACTOR))
+            new_width = max(1, int(width * factor))
+            new_height = max(1, int(height * factor))
+
+            if new_width != width or new_height != height:
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            out = BytesIO()
+
+            if ext in [".jpg", ".jpeg"]:
+                if img.mode not in ["RGB", "L"]:
+                    img = img.convert("RGB")
+                img.save(out, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True, progressive=True)
+                new_type = "image/jpeg"
+            elif ext == ".webp":
+                if img.mode not in ["RGB", "RGBA"]:
+                    img = img.convert("RGBA")
+                img.save(out, format="WEBP", quality=IMAGE_WEBP_QUALITY, method=6)
+                new_type = "image/webp"
+            else:
+                # PNG keeps transparency and uses lossless optimization.
+                if img.mode not in ["RGB", "RGBA", "L", "LA", "P"]:
+                    img = img.convert("RGBA")
+                img.save(out, format="PNG", optimize=True, compress_level=9)
+                new_type = "image/png"
+
+            compressed = out.getvalue()
+
+            # Only replace the upload if it is actually smaller.
+            if 0 < len(compressed) < len(file_bytes):
+                info["compressed"] = True
+                info["compressed_size"] = len(compressed)
+                info["saved_bytes"] = len(file_bytes) - len(compressed)
+                return compressed, new_type, info
+
+    except Exception:
+        pass
+
+    return file_bytes, content_type or image_content_type(filename), info
 
 
 def fetch_discord_messages(max_pages=60, stop_after_snapshot=False):
@@ -304,7 +443,7 @@ def load_store(force=False):
                 db_url = attachments[0].get("url", "")
                 r = requests.get(db_url, timeout=20)
                 r.raise_for_status()
-                db = normalize_db(r.json())
+                db = load_db_snapshot_bytes(r.content, attachments[0].get("filename", ""))
                 snapshot_loaded = True
             except Exception:
                 pass
@@ -327,16 +466,17 @@ def save_db(db):
     db = normalize_db(db)
     db["updated_at"] = now_ms()
 
-    raw = json.dumps(db, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    raw_json = json.dumps(db, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    raw = gzip.compress(raw_json, compresslevel=6)
 
     if len(raw) > MAX_DB_SIZE:
-        raise ValueError("Discord DB snapshot is too large. Delete old data or raise MAX_DB_SIZE.")
+        raise ValueError("Discord DB snapshot is too large even after gzip compression. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v13|{int(time.time())}",
-        filename="smartweb-db.json",
+        content=f"SWDBSNAP|v14|gz|{int(time.time())}",
+        filename="smartweb-db.json.gz",
         file_bytes=raw,
-        content_type="application/json",
+        content_type="application/gzip",
     )
     clear_cache()
 
@@ -1605,7 +1745,7 @@ function showFiles(button){
                 <br><br>
                 <button class="primary-btn" type="submit">upload file</button>
             </form>
-            <p class="small">allowed: zip, mp3, png, jpg, jpeg, webp, gif. maximum size: ${maxFileMb} MB.</p>
+            <p class="small">allowed: zip, mp3, png, jpg, jpeg, webp, gif. maximum size: ${maxFileMb} MB. Images are lightly compressed before Discord upload. Upload cooldown: 60 seconds.</p>
         </div>
     `;
 
@@ -1994,7 +2134,7 @@ function showAccount(button){
                         <br><br>
                         <button class="login-btn primary-btn" type="submit">save profile picture</button>
                     </form>
-                    <div class="small">allowed: png, jpg, jpeg, webp, gif. maximum size: 3 MB.</div>
+                    <div class="small">allowed: png, jpg, jpeg, webp, gif. maximum size: 3 MB. Images are lightly compressed before Discord upload. Cooldown: 10 minutes.</div>
                 </div>
 
                 <div class="account-section">
@@ -2013,6 +2153,7 @@ function showAccount(button){
                     <form action="/change-username" method="POST">
                         <input class="login-input" name="new_username" placeholder="new username" required>
                         <button class="login-btn primary-btn" type="submit">save username</button>
+                        <div class="small">Username cooldown: 5 days.</div>
                     </form>
                 </div>
 
@@ -2191,7 +2332,7 @@ async function checkForUpdates(){
     }
 }
 
-setInterval(checkForUpdates, 15000);
+setInterval(checkForUpdates, 30000);
 
 function escapeHtml(text){
     return String(text)
@@ -2389,16 +2530,20 @@ def register():
     existing_uid, existing_user = find_user_by_email(db, email)
 
     if existing_user:
-        # The same email can keep its own username, but cannot steal another user's username.
-        for other_id, other_user in list(db["users"].items()):
-            if other_id == existing_uid:
-                continue
-            if other_user.get("username", "").strip().lower() == username.lower():
-                flash("Username already exists. Choose another one.", "error")
-                return redirect(url_for("home", view="register"))
+        # Existing email opens/restores the account. Username only changes if the 5-day cooldown allows it.
+        old_username_for_check = existing_user.get("username", "").strip().lower()
+        wants_username_change = username.lower() != old_username_for_check
+        username_left = cooldown_left(existing_user, "last_username_change_at", USERNAME_COOLDOWN_SECONDS)
+
+        if wants_username_change and username_left <= 0:
+            for other_id, other_user in list(db["users"].items()):
+                if other_id == existing_uid:
+                    continue
+                if other_user.get("username", "").strip().lower() == username.lower():
+                    flash("Username already exists. Choose another one.", "error")
+                    return redirect(url_for("home", view="register"))
 
         existing_user["id"] = existing_uid
-        existing_user["username"] = username
         existing_user["email"] = email
         existing_user["password_hash"] = generate_password_hash(password)
         existing_user["email_verified"] = True
@@ -2408,7 +2553,21 @@ def register():
         existing_user.setdefault("last_seen_notifications", int(time.time()))
         existing_user.setdefault("last_topic_at", 0)
         existing_user.setdefault("last_comment_at", 0)
+        existing_user.setdefault("last_upload_at", 0)
+        existing_user.setdefault("last_about_change_at", 0)
+        existing_user.setdefault("last_pfp_change_at", 0)
+        existing_user.setdefault("last_password_change_at", 0)
+        existing_user.setdefault("last_username_change_at", 0)
         existing_user.setdefault("created", int(time.time()))
+
+        old_username = existing_user.get("username", "")
+        if username.lower() != old_username.strip().lower():
+            left = cooldown_left(existing_user, "last_username_change_at", USERNAME_COOLDOWN_SECONDS)
+            if left <= 0:
+                existing_user["username"] = username
+                existing_user["last_username_change_at"] = int(time.time())
+            # If cooldown is active, keep the old username but still open the account.
+
         existing_user["updated_at"] = int(time.time())
         db["users"][existing_uid] = existing_user
 
@@ -2444,6 +2603,11 @@ def register():
         "last_seen_notifications": int(time.time()),
         "last_topic_at": 0,
         "last_comment_at": 0,
+        "last_upload_at": 0,
+        "last_about_change_at": 0,
+        "last_pfp_change_at": 0,
+        "last_password_change_at": 0,
+        "last_username_change_at": 0,
         "created": int(time.time()),
         "updated_at": int(time.time()),
     }
@@ -2515,6 +2679,15 @@ def change_username():
         flash("Username must be 3-20 characters and only use letters, numbers, underscore, or dot.", "error")
         return go("account")
 
+    if new_username.lower() == user.get("username", "").strip().lower():
+        flash("This is already your username.", "error")
+        return go("account")
+
+    left = cooldown_left(user, "last_username_change_at", USERNAME_COOLDOWN_SECONDS)
+    if left > 0:
+        flash(f"Username can only be changed once every 5 days. Try again in {format_cooldown(left)}.", "error")
+        return go("account")
+
     for existing_user in db["users"].values():
         same_username = existing_user.get("username", "").strip().lower() == new_username.lower()
         different_account = existing_user.get("id") != user.get("id")
@@ -2524,6 +2697,7 @@ def change_username():
             return go("account")
 
     user["username"] = new_username
+    user["last_username_change_at"] = int(time.time())
     user["updated_at"] = int(time.time())
     db["users"][user["id"]] = user
 
@@ -2533,7 +2707,7 @@ def change_username():
         flash(f"Could not update username: {e}", "error")
         return go("account")
 
-    flash("Username changed successfully.", "success")
+    flash("Username changed successfully. You can change it again in 5 days.", "success")
     return go("account")
 
 
@@ -2544,9 +2718,15 @@ def change_about():
     db = store["db"]
     user = db["users"].get(current_user_id())
 
+    left = cooldown_left(user, "last_about_change_at", PROFILE_CHANGE_COOLDOWN_SECONDS)
+    if left > 0:
+        flash(f"Profile info can be changed again in {format_cooldown(left)}.", "error")
+        return go("account")
+
     about = request.form.get("about", "").strip()
 
     user["about"] = about[:500]
+    user["last_about_change_at"] = int(time.time())
     user["updated_at"] = int(time.time())
     db["users"][user["id"]] = user
 
@@ -2567,10 +2747,15 @@ def change_password():
     db = store["db"]
     user = db["users"].get(current_user_id())
 
+    left = cooldown_left(user, "last_password_change_at", PASSWORD_CHANGE_COOLDOWN_SECONDS)
+    if left > 0:
+        flash(f"Password can be changed again in {format_cooldown(left)}.", "error")
+        return go("account")
+
     old_password = request.form.get("old_password", "")
     new_password = request.form.get("new_password", "")
 
-    if not check_password_hash(user.get("password_hash", ""), old_password):
+    if not password_matches(user.get("password_hash", ""), old_password):
         flash("Old password is wrong.", "error")
         return go("account")
 
@@ -2579,6 +2764,7 @@ def change_password():
         return go("account")
 
     user["password_hash"] = generate_password_hash(new_password)
+    user["last_password_change_at"] = int(time.time())
     user["updated_at"] = int(time.time())
     db["users"][user["id"]] = user
 
@@ -2598,6 +2784,11 @@ def change_pfp():
     store = load_store(force=True)
     db = store["db"]
     user = db["users"].get(current_user_id())
+
+    left = cooldown_left(user, "last_pfp_change_at", PROFILE_CHANGE_COOLDOWN_SECONDS)
+    if left > 0:
+        flash(f"Profile picture can be changed again in {format_cooldown(left)}.", "error")
+        return go("account")
 
     if "pfp" not in request.files:
         flash("No profile picture selected.", "error")
@@ -2630,6 +2821,10 @@ def change_pfp():
         flash(f"Profile picture blocked: {reason}", "error")
         return go("account")
 
+    original_size = len(file_bytes)
+    file_bytes, final_content_type, compression_info = compress_image_for_discord(original_name, file_bytes, uploaded.content_type)
+    size = len(file_bytes)
+
     pfp_id = secrets.token_hex(12)
 
     try:
@@ -2637,7 +2832,7 @@ def change_pfp():
             pfp_id=pfp_id,
             filename=original_name,
             file_bytes=file_bytes,
-            content_type=uploaded.content_type,
+            content_type=final_content_type,
         )
     except Exception as e:
         flash(f"Could not upload profile picture to Discord: {e}", "error")
@@ -2647,10 +2842,14 @@ def change_pfp():
     pfp_info = attachment_info_from_discord(attachment)
     user["pfp_id"] = pfp_id
     user["pfp_name"] = original_name
+    user["pfp_original_size"] = original_size
+    user["pfp_size"] = size
+    user["pfp_compressed"] = bool(compression_info.get("compressed"))
     user["pfp_discord_message_id"] = discord_msg.get("id", "")
     user["pfp_attachment_url"] = pfp_info.get("url", "")
     user["pfp_attachment_proxy_url"] = pfp_info.get("proxy_url", "")
     user["pfp_updated"] = int(time.time())
+    user["last_pfp_change_at"] = int(time.time())
     user["updated_at"] = int(time.time())
     db["users"][user["id"]] = user
 
@@ -2671,6 +2870,11 @@ def upload():
     store = load_store(force=True)
     db = store["db"]
     user = db["users"].get(current_user_id())
+
+    left = cooldown_left(user, "last_upload_at", UPLOAD_COOLDOWN_SECONDS)
+    if left > 0:
+        flash(f"Upload cooldown active. Try again in {format_cooldown(left)}.", "error")
+        return go("files")
 
     if "uploadfile" not in request.files:
         flash("No file selected.", "error")
@@ -2709,6 +2913,14 @@ def upload():
         flash(f"Upload blocked: {reason}", "error")
         return go("files")
 
+    original_size = len(file_bytes)
+    final_content_type = uploaded.content_type or "application/octet-stream"
+    compression_info = {"compressed": False, "original_size": original_size, "compressed_size": original_size, "saved_bytes": 0}
+
+    if os.path.splitext(original_name.lower())[1] in ALLOWED_IMAGE_EXTENSIONS:
+        file_bytes, final_content_type, compression_info = compress_image_for_discord(original_name, file_bytes, uploaded.content_type)
+        size = len(file_bytes)
+
     for existing_file in db["files"].values():
         if existing_file.get("original_name", "").strip().lower() == original_name.strip().lower():
             flash("A file with this name already exists. Rename it before uploading again.", "error")
@@ -2721,7 +2933,7 @@ def upload():
             file_id=file_id,
             filename=original_name,
             file_bytes=file_bytes,
-            content_type=uploaded.content_type,
+            content_type=final_content_type,
         )
     except Exception as e:
         flash(f"Could not upload file to Discord: {e}", "error")
@@ -2734,7 +2946,10 @@ def upload():
         "id": file_id,
         "original_name": original_name,
         "size": size,
-        "content_type": uploaded.content_type or "application/octet-stream",
+        "original_size": original_size,
+        "compressed": bool(compression_info.get("compressed")),
+        "saved_bytes": int(compression_info.get("saved_bytes", 0)),
+        "content_type": final_content_type or "application/octet-stream",
         "kind": "image" if os.path.splitext(original_name.lower())[1] in ALLOWED_IMAGE_EXTENSIONS else ("audio" if original_name.lower().endswith(".mp3") else "zip"),
         "author": user.get("username"),
         "author_id": user.get("id"),
@@ -2746,6 +2961,9 @@ def upload():
     }
 
     db["files"][file_id] = metadata
+    user["last_upload_at"] = int(time.time())
+    user["updated_at"] = int(time.time())
+    db["users"][user["id"]] = user
 
     try:
         save_db(db)
@@ -3095,8 +3313,14 @@ def notifications_read():
         if not user:
             return jsonify({"ok": False, "error": "Account not found"}), 401
 
-        user["last_seen_notifications"] = int(time.time())
-        user["updated_at"] = int(time.time())
+        now_ts = int(time.time())
+        last_seen = int(user.get("last_seen_notifications", 0))
+
+        if now_ts - last_seen < NOTIFICATION_SAVE_COOLDOWN_SECONDS:
+            return jsonify({"ok": True, "skipped_save": True})
+
+        user["last_seen_notifications"] = now_ts
+        user["updated_at"] = now_ts
         db["users"][user["id"]] = user
         save_db(db)
 
