@@ -156,6 +156,26 @@ def clear_cache():
     CACHE["store"] = None
 
 
+def attachment_name_key(filename):
+    return secure_filename(filename or "").strip().lower()
+
+
+def attachment_info_from_discord(a):
+    return {
+        "url": a.get("url", ""),
+        "proxy_url": a.get("proxy_url", ""),
+        "filename": a.get("filename", ""),
+        "size": a.get("size", 0),
+        "content_type": a.get("content_type", ""),
+    }
+
+
+def best_attachment_url(info):
+    if not info:
+        return ""
+    return info.get("url") or info.get("proxy_url") or ""
+
+
 def fetch_discord_messages():
     all_messages = []
     before = None
@@ -211,6 +231,7 @@ def load_store(force=False):
 
     db = blank_db()
     file_urls = {}
+    file_urls_by_name = {}
     pfp_urls = {}
     snapshot_loaded = False
 
@@ -218,25 +239,21 @@ def load_store(force=False):
         content = msg.get("content", "") or ""
         attachments = msg.get("attachments", []) or []
 
+        for a in attachments:
+            info = attachment_info_from_discord(a)
+            name_key = attachment_name_key(info.get("filename", ""))
+            if name_key and name_key not in file_urls_by_name:
+                file_urls_by_name[name_key] = info
+
         if content.startswith("SWFILE|"):
             file_id = content.split("|", 1)[1].strip()
             if file_id and file_id not in file_urls and attachments:
-                a = attachments[0]
-                file_urls[file_id] = {
-                    "url": a.get("url", ""),
-                    "filename": a.get("filename", ""),
-                    "size": a.get("size", 0),
-                }
+                file_urls[file_id] = attachment_info_from_discord(attachments[0])
 
         elif content.startswith("SWPFP|"):
             pfp_id = content.split("|", 1)[1].strip()
             if pfp_id and pfp_id not in pfp_urls and attachments:
-                a = attachments[0]
-                pfp_urls[pfp_id] = {
-                    "url": a.get("url", ""),
-                    "filename": a.get("filename", ""),
-                    "size": a.get("size", 0),
-                }
+                pfp_urls[pfp_id] = attachment_info_from_discord(attachments[0])
 
         elif content.startswith("SWDBSNAP|") and not snapshot_loaded and attachments:
             try:
@@ -251,6 +268,7 @@ def load_store(force=False):
     store = {
         "db": normalize_db(db),
         "file_urls": file_urls,
+        "file_urls_by_name": file_urls_by_name,
         "pfp_urls": pfp_urls,
         "message_count": len(messages),
         "snapshot_loaded": snapshot_loaded,
@@ -295,6 +313,23 @@ def save_profile_picture_to_discord(pfp_id, filename, file_bytes, content_type):
         file_bytes=file_bytes,
         content_type=content_type or "application/octet-stream",
     )
+
+
+def find_file_attachment_info(file_id, file_data, store):
+    # First use the exact SWFILE|file_id Discord message.
+    info = store.get("file_urls", {}).get(file_id)
+    if best_attachment_url(info):
+        return info
+
+    # Fallback: older DB snapshots can have the file metadata but miss the SWFILE mapping.
+    # In that case, find the uploaded Discord attachment by its saved original filename.
+    original_name = file_data.get("original_name", "") if isinstance(file_data, dict) else ""
+    name_key = attachment_name_key(original_name)
+    info = store.get("file_urls_by_name", {}).get(name_key)
+    if best_attachment_url(info):
+        return info
+
+    return None
 
 
 def normalize_email(email):
@@ -1250,7 +1285,7 @@ function audioPlayerHtml(file){
     if(!file.is_audio) return "";
     return `
         <div class="audio-player" data-audio-player>
-            <audio preload="metadata" src="${escapeAttr(file.stream_url)}"></audio>
+            <audio preload="none" src="${escapeAttr(file.stream_url)}" type="audio/mpeg"></audio>
             <div class="audio-controls">
                 <button type="button" class="audio-btn" data-play>▶</button>
                 <button type="button" class="audio-btn" data-pause>⏸</button>
@@ -1306,6 +1341,9 @@ function bindAudioPlayers(){
         audio.addEventListener("loadedmetadata", update);
         audio.addEventListener("timeupdate", update);
         audio.addEventListener("ended", update);
+        audio.addEventListener("error", ()=>{
+            timeText.textContent = "MP3 not found";
+        });
         update();
     });
 }
@@ -2556,7 +2594,6 @@ def download(file_id):
     try:
         store = load_store(force=True)
         db = store["db"]
-        file_urls = store["file_urls"]
     except Exception as e:
         flash(f"Discord database error: {e}", "error")
         return go("files")
@@ -2566,7 +2603,8 @@ def download(file_id):
         flash("File not found.", "error")
         return go("files")
 
-    file_url = file_urls.get(file_id, {}).get("url")
+    info = find_file_attachment_info(file_id, file_data, store)
+    file_url = best_attachment_url(info)
     if not file_url:
         flash("Discord file attachment not found.", "error")
         return go("files")
@@ -2592,7 +2630,6 @@ def stream_file(file_id):
     try:
         store = load_store(force=True)
         db = store["db"]
-        file_urls = store["file_urls"]
     except Exception:
         abort(404)
 
@@ -2603,22 +2640,14 @@ def stream_file(file_id):
     if not file_data.get("original_name", "").lower().endswith(".mp3"):
         abort(404)
 
-    file_url = file_urls.get(file_id, {}).get("url")
+    info = find_file_attachment_info(file_id, file_data, store)
+    file_url = best_attachment_url(info)
     if not file_url:
         abort(404)
 
-    try:
-        response = requests.get(file_url, timeout=60)
-        response.raise_for_status()
-    except Exception:
-        abort(404)
-
-    return send_file(
-        BytesIO(response.content),
-        mimetype="audio/mpeg",
-        as_attachment=False,
-        download_name=file_data.get("original_name", "audio.mp3"),
-    )
+    # Do not download the whole MP3 through Flask.
+    # Redirect to Discord CDN so browser audio metadata, seeking, and streaming work fast.
+    return redirect(file_url, code=302)
 
 
 @app.route("/preview/<file_id>")
@@ -2627,7 +2656,6 @@ def preview_file(file_id):
     try:
         store = load_store(force=True)
         db = store["db"]
-        file_urls = store["file_urls"]
     except Exception:
         abort(404)
 
@@ -2639,22 +2667,12 @@ def preview_file(file_id):
     if os.path.splitext(original_name.lower())[1] not in ALLOWED_IMAGE_EXTENSIONS:
         abort(404)
 
-    file_url = file_urls.get(file_id, {}).get("url")
+    info = find_file_attachment_info(file_id, file_data, store)
+    file_url = best_attachment_url(info)
     if not file_url:
         abort(404)
 
-    try:
-        response = requests.get(file_url, timeout=60)
-        response.raise_for_status()
-    except Exception:
-        abort(404)
-
-    content_type = response.headers.get("Content-Type", file_data.get("content_type", "image/png"))
-    out = send_file(BytesIO(response.content), mimetype=content_type, as_attachment=False, download_name=original_name or "image.png")
-    out.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    out.headers["Pragma"] = "no-cache"
-    out.headers["Expires"] = "0"
-    return out
+    return redirect(file_url, code=302)
 
 
 @app.route("/pfp/<user_id>")
