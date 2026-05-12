@@ -73,8 +73,15 @@ BLOCKED_EMAIL_DOMAINS = {
     "tempinbox.com", "instant-email.org", "spam4.me", "inboxbear.com"
 }
 
-CACHE_SECONDS = 2
+# Speed settings. The old version scanned your whole Discord DB channel very often.
+# This version only grabs the latest DB snapshot for normal page loads.
+CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "30"))
+FAST_BOOT_MESSAGE_PAGES = int(os.environ.get("FAST_BOOT_MESSAGE_PAGES", "3"))
+ATTACHMENT_CACHE_SECONDS = int(os.environ.get("ATTACHMENT_CACHE_SECONDS", "1800"))
+LIVE_POLL_MS = int(os.environ.get("LIVE_POLL_MS", "15000"))
+
 CACHE = {"time": 0, "store": None}
+ATTACHMENT_CACHE = {"items": {}}
 
 CREDITS = {
     "OWNERS": ["DJ TUTTER", "DJ LIRA DA ZL"],
@@ -176,11 +183,11 @@ def best_attachment_url(info):
     return info.get("url") or info.get("proxy_url") or ""
 
 
-def fetch_discord_messages():
+def fetch_discord_messages(max_pages=60, stop_after_snapshot=False):
     all_messages = []
     before = None
 
-    for _ in range(60):
+    for _ in range(max_pages):
         params = {"limit": 100}
         if before:
             params["before"] = before
@@ -193,6 +200,11 @@ def fetch_discord_messages():
 
         all_messages.extend(messages)
         before = messages[-1]["id"]
+
+        # For normal website loads we only need the newest DB snapshot.
+        # This avoids scanning thousands of Discord messages every page load.
+        if stop_after_snapshot and any((m.get("content", "") or "").startswith("SWDBSNAP|") for m in messages):
+            break
 
         if len(messages) < 100:
             break
@@ -221,12 +233,35 @@ def post_discord_attachment(content, filename, file_bytes, content_type):
     return r.json()
 
 
+def cache_attachment(kind, key, info):
+    if not key or not info or not best_attachment_url(info):
+        return
+    ATTACHMENT_CACHE["items"][(kind, str(key))] = {
+        "time": time.time(),
+        "info": info,
+    }
+
+
+def get_cached_attachment(kind, key):
+    if not key:
+        return None
+    item = ATTACHMENT_CACHE["items"].get((kind, str(key)))
+    if not item:
+        return None
+    if time.time() - float(item.get("time", 0)) > ATTACHMENT_CACHE_SECONDS:
+        ATTACHMENT_CACHE["items"].pop((kind, str(key)), None)
+        return None
+    return item.get("info")
+
+
 def load_store(force=False):
     now = time.time()
     if not force and CACHE["store"] is not None and now - CACHE["time"] < CACHE_SECONDS:
         return CACHE["store"]
 
-    messages = fetch_discord_messages()
+    # Fast path: only scan the newest few Discord pages until the latest DB snapshot is found.
+    # The old code scanned up to 60 pages on every load and every live update.
+    messages = fetch_discord_messages(max_pages=FAST_BOOT_MESSAGE_PAGES, stop_after_snapshot=True)
     messages.sort(key=lambda m: int(m.get("id", 0)), reverse=True)
 
     db = blank_db()
@@ -238,27 +273,36 @@ def load_store(force=False):
     for msg in messages:
         content = msg.get("content", "") or ""
         attachments = msg.get("attachments", []) or []
+        msg_id = msg.get("id", "")
 
         for a in attachments:
             info = attachment_info_from_discord(a)
+            info["message_id"] = msg_id
             name_key = attachment_name_key(info.get("filename", ""))
             if name_key and name_key not in file_urls_by_name:
                 file_urls_by_name[name_key] = info
+                cache_attachment("name", name_key, info)
 
         if content.startswith("SWFILE|"):
             file_id = content.split("|", 1)[1].strip()
-            if file_id and file_id not in file_urls and attachments:
-                file_urls[file_id] = attachment_info_from_discord(attachments[0])
+            if file_id and attachments:
+                info = attachment_info_from_discord(attachments[0])
+                info["message_id"] = msg_id
+                file_urls[file_id] = info
+                cache_attachment("file", file_id, info)
 
         elif content.startswith("SWPFP|"):
             pfp_id = content.split("|", 1)[1].strip()
-            if pfp_id and pfp_id not in pfp_urls and attachments:
-                pfp_urls[pfp_id] = attachment_info_from_discord(attachments[0])
+            if pfp_id and attachments:
+                info = attachment_info_from_discord(attachments[0])
+                info["message_id"] = msg_id
+                pfp_urls[pfp_id] = info
+                cache_attachment("pfp", pfp_id, info)
 
         elif content.startswith("SWDBSNAP|") and not snapshot_loaded and attachments:
             try:
                 db_url = attachments[0].get("url", "")
-                r = requests.get(db_url, timeout=45)
+                r = requests.get(db_url, timeout=20)
                 r.raise_for_status()
                 db = normalize_db(r.json())
                 snapshot_loaded = True
@@ -298,7 +342,7 @@ def save_db(db):
 
 
 def save_uploaded_file_to_discord(file_id, filename, file_bytes, content_type):
-    post_discord_attachment(
+    return post_discord_attachment(
         content=f"SWFILE|{file_id}",
         filename=filename,
         file_bytes=file_bytes,
@@ -307,7 +351,7 @@ def save_uploaded_file_to_discord(file_id, filename, file_bytes, content_type):
 
 
 def save_profile_picture_to_discord(pfp_id, filename, file_bytes, content_type):
-    post_discord_attachment(
+    return post_discord_attachment(
         content=f"SWPFP|{pfp_id}",
         filename=filename,
         file_bytes=file_bytes,
@@ -315,21 +359,139 @@ def save_profile_picture_to_discord(pfp_id, filename, file_bytes, content_type):
     )
 
 
-def find_file_attachment_info(file_id, file_data, store):
-    # First use the exact SWFILE|file_id Discord message.
-    info = store.get("file_urls", {}).get(file_id)
-    if best_attachment_url(info):
-        return info
+def discord_message_attachment_info(message_id):
+    cached = get_cached_attachment("message", message_id)
+    if cached:
+        return cached
 
-    # Fallback: older DB snapshots can have the file metadata but miss the SWFILE mapping.
-    # In that case, find the uploaded Discord attachment by its saved original filename.
-    original_name = file_data.get("original_name", "") if isinstance(file_data, dict) else ""
-    name_key = attachment_name_key(original_name)
-    info = store.get("file_urls_by_name", {}).get(name_key)
-    if best_attachment_url(info):
+    if not message_id:
+        return None
+
+    try:
+        r = discord_request("GET", f"/channels/{DISCORD_DB_CHANNEL_ID}/messages/{message_id}")
+        msg = r.json()
+        attachments = msg.get("attachments", []) or []
+        if not attachments:
+            return None
+        info = attachment_info_from_discord(attachments[0])
+        info["message_id"] = message_id
+        cache_attachment("message", message_id, info)
         return info
+    except Exception:
+        return None
+
+
+def slow_find_attachment(prefix, target_id=None, filename=None):
+    # Old data may not have the Discord message id saved in the DB.
+    # This slow scan is only used as a fallback and then cached.
+    name_key = attachment_name_key(filename or "")
+    messages = fetch_discord_messages(max_pages=60, stop_after_snapshot=False)
+
+    for msg in messages:
+        content = msg.get("content", "") or ""
+        attachments = msg.get("attachments", []) or []
+        if not attachments:
+            continue
+
+        info = attachment_info_from_discord(attachments[0])
+        info["message_id"] = msg.get("id", "")
+        msg_name_key = attachment_name_key(info.get("filename", ""))
+
+        if target_id and content.startswith(prefix + "|"):
+            found_id = content.split("|", 1)[1].strip()
+            if found_id == target_id:
+                cache_attachment("file" if prefix == "SWFILE" else "pfp", target_id, info)
+                if msg_name_key:
+                    cache_attachment("name", msg_name_key, info)
+                return info
+
+        if name_key and msg_name_key == name_key:
+            cache_attachment("name", name_key, info)
+            return info
 
     return None
+
+
+def find_file_attachment_info(file_id, file_data, store):
+    if not isinstance(file_data, dict):
+        file_data = {}
+
+    # New fast DB format: saved Discord message id from the upload message.
+    msg_id = file_data.get("discord_message_id", "")
+    info = discord_message_attachment_info(msg_id)
+    if best_attachment_url(info):
+        cache_attachment("file", file_id, info)
+        return info
+
+    # Fast in-memory cache.
+    info = get_cached_attachment("file", file_id)
+    if best_attachment_url(info):
+        return info
+
+    # Recent messages scanned during normal DB load.
+    info = store.get("file_urls", {}).get(file_id)
+    if best_attachment_url(info):
+        cache_attachment("file", file_id, info)
+        return info
+
+    # DB may contain an attachment URL from upload time. This is very fast.
+    # If it ever expires, fallback scan below still supports old files after refresh.
+    if file_data.get("attachment_url") or file_data.get("attachment_proxy_url") or file_data.get("url") or file_data.get("proxy_url"):
+        return {
+            "url": file_data.get("attachment_url", "") or file_data.get("url", ""),
+            "proxy_url": file_data.get("attachment_proxy_url", "") or file_data.get("proxy_url", ""),
+            "filename": file_data.get("attachment_filename", "") or file_data.get("original_name", ""),
+            "size": file_data.get("size", 0),
+            "content_type": file_data.get("content_type", ""),
+            "message_id": msg_id,
+        }
+
+    # Fallback by exact original filename.
+    original_name = file_data.get("original_name", "")
+    name_key = attachment_name_key(original_name)
+
+    info = get_cached_attachment("name", name_key)
+    if best_attachment_url(info):
+        return info
+
+    info = store.get("file_urls_by_name", {}).get(name_key)
+    if best_attachment_url(info):
+        cache_attachment("name", name_key, info)
+        return info
+
+    return slow_find_attachment("SWFILE", target_id=file_id, filename=original_name)
+
+
+def find_pfp_attachment_info(pfp_id, user, store):
+    if not pfp_id:
+        return None
+
+    msg_id = user.get("pfp_discord_message_id", "") if isinstance(user, dict) else ""
+    info = discord_message_attachment_info(msg_id)
+    if best_attachment_url(info):
+        cache_attachment("pfp", pfp_id, info)
+        return info
+
+    info = get_cached_attachment("pfp", pfp_id)
+    if best_attachment_url(info):
+        return info
+
+    info = store.get("pfp_urls", {}).get(pfp_id)
+    if best_attachment_url(info):
+        cache_attachment("pfp", pfp_id, info)
+        return info
+
+    if isinstance(user, dict) and (user.get("pfp_attachment_url") or user.get("pfp_attachment_proxy_url")):
+        return {
+            "url": user.get("pfp_attachment_url", ""),
+            "proxy_url": user.get("pfp_attachment_proxy_url", ""),
+            "filename": user.get("pfp_name", "profile.png"),
+            "size": 0,
+            "content_type": "image/png",
+            "message_id": msg_id,
+        }
+
+    return slow_find_attachment("SWPFP", target_id=pfp_id, filename=user.get("pfp_name", "") if isinstance(user, dict) else "")
 
 
 def normalize_email(email):
@@ -602,12 +764,7 @@ def pfp_url_from_user(user, store=None):
     if not pfp_id:
         return ""
 
-    if store is None:
-        store = load_store()
-
-    if pfp_id not in store["pfp_urls"]:
-        return ""
-
+    # Do not scan Discord here. Just return the route; /pfp resolves the attachment lazily.
     return url_for("profile_picture", user_id=user.get("id", ""), v=user.get("pfp_updated", 0))
 
 
@@ -2034,7 +2191,7 @@ async function checkForUpdates(){
     }
 }
 
-setInterval(checkForUpdates, 3000);
+setInterval(checkForUpdates, 15000);
 
 function escapeHtml(text){
     return String(text)
@@ -2476,7 +2633,7 @@ def change_pfp():
     pfp_id = secrets.token_hex(12)
 
     try:
-        save_profile_picture_to_discord(
+        discord_msg = save_profile_picture_to_discord(
             pfp_id=pfp_id,
             filename=original_name,
             file_bytes=file_bytes,
@@ -2486,8 +2643,13 @@ def change_pfp():
         flash(f"Could not upload profile picture to Discord: {e}", "error")
         return go("account")
 
+    attachment = (discord_msg.get("attachments", []) or [{}])[0]
+    pfp_info = attachment_info_from_discord(attachment)
     user["pfp_id"] = pfp_id
     user["pfp_name"] = original_name
+    user["pfp_discord_message_id"] = discord_msg.get("id", "")
+    user["pfp_attachment_url"] = pfp_info.get("url", "")
+    user["pfp_attachment_proxy_url"] = pfp_info.get("proxy_url", "")
     user["pfp_updated"] = int(time.time())
     user["updated_at"] = int(time.time())
     db["users"][user["id"]] = user
@@ -2555,7 +2717,7 @@ def upload():
     file_id = secrets.token_hex(12)
 
     try:
-        save_uploaded_file_to_discord(
+        discord_msg = save_uploaded_file_to_discord(
             file_id=file_id,
             filename=original_name,
             file_bytes=file_bytes,
@@ -2564,6 +2726,9 @@ def upload():
     except Exception as e:
         flash(f"Could not upload file to Discord: {e}", "error")
         return go("files")
+
+    attachment = (discord_msg.get("attachments", []) or [{}])[0]
+    attachment_info = attachment_info_from_discord(attachment)
 
     metadata = {
         "id": file_id,
@@ -2574,6 +2739,10 @@ def upload():
         "author": user.get("username"),
         "author_id": user.get("id"),
         "created": int(time.time()),
+        "discord_message_id": discord_msg.get("id", ""),
+        "attachment_url": attachment_info.get("url", ""),
+        "attachment_proxy_url": attachment_info.get("proxy_url", ""),
+        "attachment_filename": attachment_info.get("filename", original_name),
     }
 
     db["files"][file_id] = metadata
@@ -2592,7 +2761,7 @@ def upload():
 @login_required
 def download(file_id):
     try:
-        store = load_store(force=True)
+        store = load_store()
         db = store["db"]
     except Exception as e:
         flash(f"Discord database error: {e}", "error")
@@ -2609,26 +2778,15 @@ def download(file_id):
         flash("Discord file attachment not found.", "error")
         return go("files")
 
-    try:
-        response = requests.get(file_url, timeout=60)
-        response.raise_for_status()
-    except Exception as e:
-        flash(f"Could not download Discord attachment: {e}", "error")
-        return go("files")
-
-    return send_file(
-        BytesIO(response.content),
-        as_attachment=True,
-        download_name=file_data.get("original_name", "download"),
-        mimetype=file_data.get("content_type", "application/octet-stream"),
-    )
+    # Faster: send the browser directly to the Discord CDN instead of proxying the whole file through Flask.
+    return redirect(file_url, code=302)
 
 
 @app.route("/stream/<file_id>")
 @login_required
 def stream_file(file_id):
     try:
-        store = load_store(force=True)
+        store = load_store()
         db = store["db"]
     except Exception:
         abort(404)
@@ -2654,7 +2812,7 @@ def stream_file(file_id):
 @login_required
 def preview_file(file_id):
     try:
-        store = load_store(force=True)
+        store = load_store()
         db = store["db"]
     except Exception:
         abort(404)
@@ -2679,9 +2837,8 @@ def preview_file(file_id):
 @login_required
 def profile_picture(user_id):
     try:
-        store = load_store(force=True)
+        store = load_store()
         db = store["db"]
-        pfp_urls = store["pfp_urls"]
     except Exception:
         abort(404)
 
@@ -2693,22 +2850,12 @@ def profile_picture(user_id):
     if not pfp_id:
         abort(404)
 
-    pfp_url = pfp_urls.get(pfp_id, {}).get("url")
+    info = find_pfp_attachment_info(pfp_id, user, store)
+    pfp_url = best_attachment_url(info)
     if not pfp_url:
         abort(404)
 
-    try:
-        response = requests.get(pfp_url, timeout=60)
-        response.raise_for_status()
-    except Exception:
-        abort(404)
-
-    content_type = response.headers.get("Content-Type", "image/png")
-    out = send_file(BytesIO(response.content), mimetype=content_type)
-    out.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    out.headers["Pragma"] = "no-cache"
-    out.headers["Expires"] = "0"
-    return out
+    return redirect(pfp_url, code=302)
 
 
 @app.route("/topic", methods=["POST"])
@@ -2922,7 +3069,7 @@ def send_dm(target_id):
 @login_required
 def live_state():
     try:
-        store = load_store(force=True)
+        store = load_store()
         db = store["db"]
         user = db["users"].get(current_user_id())
 
