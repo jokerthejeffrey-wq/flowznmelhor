@@ -1145,7 +1145,7 @@ HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>FlowZNmelhor</title>
+<title>FunkFile</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
@@ -1504,7 +1504,7 @@ audio::-webkit-media-controls-panel{
 
 <div class="login-only">
     <div class="login-shell">
-        <div class="logo">FLOWZNMELHOR</div>
+        <div class="logo">FunkFile</div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -1559,7 +1559,7 @@ audio::-webkit-media-controls-panel{
 
 <div class="app">
     <div class="side">
-        <div class="logo">FLOWZNMELHOR</div>
+        <div class="logo">FunkFile</div>
 
         <a class="user-mini" href="/?view=account">
             <div class="pfp">
