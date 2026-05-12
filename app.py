@@ -71,7 +71,10 @@ EMAIL_REGEX = re.compile(
 )
 
 BLOCKED_EMAIL_DOMAINS = {
+    # Obvious fake/test domains
     "example.com", "example.org", "example.net", "test.com", "fake.com",
+
+    # Temporary/disposable email domains
     "mailinator.com", "10minutemail.com", "10minutemail.net", "10minutemail.org",
     "guerrillamail.com", "guerrillamail.net", "guerrillamail.org",
     "temp-mail.org", "tempmail.com", "tempmail.net", "tempmailo.com",
@@ -85,8 +88,36 @@ BLOCKED_EMAIL_DOMAINS = {
     "trash-mail.com", "tempm.com", "temporary-mail.net", "tempmailaddress.com",
     "mohmal.com", "emailfake.com", "fexpost.com", "fexbox.org", "fextemp.com",
     "tmpmail.org", "tmpmail.net", "minuteinbox.com", "emailtemporanea.com",
-    "tempinbox.com", "instant-email.org", "spam4.me", "inboxbear.com"
+    "tempinbox.com", "instant-email.org", "spam4.me", "inboxbear.com",
+
+    # Privacy/alias providers you asked to block for this community.
+    # Remove these lines if you later decide to allow normal privacy emails.
+    "proton.me", "protonmail.com", "pm.me",
+    "simplelogin.com", "simplelogin.io", "aleeas.com", "slmail.me",
+    "duck.com", "addy.io", "anonaddy.com", "tuta.com", "tutanota.com",
 }
+
+# Exact emails and suspicious local-parts that should be removed if they appear in the DB.
+BLOCKED_EMAIL_ADDRESSES = {
+    "flowznsucks@proton.me",
+}
+
+BLOCKED_EMAIL_LOCAL_KEYWORDS = {
+    "flowznsucks",
+}
+
+# Optional Render env vars:
+# EXTRA_BLOCKED_EMAIL_DOMAINS=domain1.com,domain2.com
+# EXTRA_BLOCKED_EMAIL_ADDRESSES=user@example.com,user2@example.com
+for _domain in os.environ.get("EXTRA_BLOCKED_EMAIL_DOMAINS", "").split(","):
+    _domain = _domain.strip().lower()
+    if _domain:
+        BLOCKED_EMAIL_DOMAINS.add(_domain)
+
+for _email in os.environ.get("EXTRA_BLOCKED_EMAIL_ADDRESSES", "").split(","):
+    _email = _email.strip().lower()
+    if _email:
+        BLOCKED_EMAIL_ADDRESSES.add(_email)
 
 # Speed settings. The old version scanned your whole Discord DB channel very often.
 # This version only grabs the latest DB snapshot for normal page loads.
@@ -111,7 +142,7 @@ def now_ms():
 
 def blank_db():
     return {
-        "version": 14,
+        "version": 15,
         "users": {},
         "topics": {},
         "comments": {},
@@ -134,7 +165,7 @@ def normalize_db(db):
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
-    clean["version"] = 14
+    clean["version"] = 15
     clean.setdefault("created_at", now_ms())
     clean.setdefault("updated_at", now_ms())
     return clean
@@ -215,6 +246,133 @@ def load_db_snapshot_bytes(raw, filename=""):
         return normalize_db(json.loads(raw.decode("utf-8")))
     except Exception:
         return blank_db()
+
+
+def quick_normalize_email(email):
+    return (email or "").strip().lower()
+
+
+def quick_email_domain(email):
+    email = quick_normalize_email(email)
+    if "@" not in email:
+        return ""
+    return email.rsplit("@", 1)[1].strip().lower()
+
+
+def blocked_email_reason(email):
+    """
+    Returns a human-readable reason if the email must be blocked/deleted.
+    This is used before normal validation too, so blocked old accounts get purged.
+    """
+    email = quick_normalize_email(email)
+    if not email:
+        return "Email is empty."
+
+    if email in BLOCKED_EMAIL_ADDRESSES:
+        return "This exact email address is blocked."
+
+    local = email.split("@", 1)[0].lower() if "@" in email else email.lower()
+    for word in BLOCKED_EMAIL_LOCAL_KEYWORDS:
+        word = (word or "").strip().lower()
+        if word and word in local:
+            return "This email name is blocked."
+
+    domain = quick_email_domain(email)
+    if not domain:
+        return "Invalid email format."
+
+    for blocked in BLOCKED_EMAIL_DOMAINS:
+        blocked = (blocked or "").strip().lower()
+        if blocked and (domain == blocked or domain.endswith("." + blocked)):
+            return "Temporary, fake, privacy, or blocked email domains are not allowed."
+
+    return ""
+
+
+def email_is_blocked(email):
+    return bool(blocked_email_reason(email))
+
+
+def delete_user_and_content(db, uid):
+    """
+    Deletes the account and hides its site data from the DB.
+    Discord attachment messages are not deleted here, but their DB entries are removed,
+    so they stop showing on the website.
+    """
+    db = normalize_db(db)
+    uid = str(uid or "")
+    deleted = {
+        "users": 0,
+        "topics": 0,
+        "comments": 0,
+        "file_comments": 0,
+        "files": 0,
+        "dms": 0,
+    }
+
+    if uid in db["users"]:
+        db["users"].pop(uid, None)
+        deleted["users"] += 1
+
+    deleted_topic_ids = []
+    for topic_id, topic in list(db["topics"].items()):
+        if topic.get("author_id") == uid:
+            deleted_topic_ids.append(topic_id)
+            db["topics"].pop(topic_id, None)
+            deleted["topics"] += 1
+
+    deleted_file_ids = []
+    for file_id, file_data in list(db["files"].items()):
+        if file_data.get("author_id") == uid:
+            deleted_file_ids.append(file_id)
+            db["files"].pop(file_id, None)
+            deleted["files"] += 1
+
+    for comment_id, comment in list(db["comments"].items()):
+        if comment.get("author_id") == uid or comment.get("topic_id") in deleted_topic_ids:
+            db["comments"].pop(comment_id, None)
+            deleted["comments"] += 1
+
+    for comment_id, comment in list(db["file_comments"].items()):
+        if comment.get("author_id") == uid or comment.get("file_id") in deleted_file_ids:
+            db["file_comments"].pop(comment_id, None)
+            deleted["file_comments"] += 1
+
+    for dm_id, dm in list(db["dms"].items()):
+        if dm.get("from") == uid or dm.get("to") == uid:
+            db["dms"].pop(dm_id, None)
+            deleted["dms"] += 1
+
+    db["updated_at"] = now_ms()
+    return deleted
+
+
+def purge_blocked_email_accounts(db):
+    """
+    Deletes every user in the DB whose saved email is now blocked.
+    Called when the newest DB snapshot is loaded and before each DB save.
+    """
+    db = normalize_db(db)
+    deleted_users = []
+
+    for uid, user in list(db["users"].items()):
+        email = quick_normalize_email(user.get("email", ""))
+        reason = blocked_email_reason(email)
+        if reason:
+            deleted_users.append({
+                "id": uid,
+                "email": email,
+                "username": user.get("username", "unknown"),
+                "reason": reason,
+            })
+            delete_user_and_content(db, uid)
+
+    if deleted_users:
+        db["last_blocked_email_purge_at"] = int(time.time())
+        db["last_blocked_email_purge_count"] = len(deleted_users)
+        db["updated_at"] = now_ms()
+
+    return deleted_users
 
 
 def format_cooldown(seconds):
@@ -448,8 +606,18 @@ def load_store(force=False):
             except Exception:
                 pass
 
+    db = normalize_db(db)
+    purged_blocked_accounts = purge_blocked_email_accounts(db)
+    if purged_blocked_accounts:
+        try:
+            # Save a clean snapshot so blocked accounts stay deleted.
+            save_db(db)
+        except Exception:
+            pass
+
     store = {
-        "db": normalize_db(db),
+        "db": db,
+        "purged_blocked_accounts": purged_blocked_accounts,
         "file_urls": file_urls,
         "file_urls_by_name": file_urls_by_name,
         "pfp_urls": pfp_urls,
@@ -464,6 +632,7 @@ def load_store(force=False):
 
 def save_db(db):
     db = normalize_db(db)
+    purge_blocked_email_accounts(db)
     db["updated_at"] = now_ms()
 
     raw_json = json.dumps(db, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -473,7 +642,7 @@ def save_db(db):
         raise ValueError("Discord DB snapshot is too large even after gzip compression. Delete old data or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v14|gz|{int(time.time())}",
+        content=f"SWDBSNAP|v15|gz|{int(time.time())}",
         filename="smartweb-db.json.gz",
         file_bytes=raw,
         content_type="application/gzip",
@@ -639,9 +808,10 @@ def normalize_email(email):
 
 
 def email_domain_is_blocked(domain):
-    domain = domain.lower().strip()
+    domain = (domain or "").lower().strip()
     for blocked in BLOCKED_EMAIL_DOMAINS:
-        if domain == blocked or domain.endswith("." + blocked):
+        blocked = (blocked or "").lower().strip()
+        if blocked and (domain == blocked or domain.endswith("." + blocked)):
             return True
     return False
 
@@ -671,6 +841,10 @@ def email_domain_format_ok(domain):
 def validate_email_basic(email):
     email = normalize_email(email)
 
+    blocked_reason = blocked_email_reason(email)
+    if blocked_reason:
+        return False, blocked_reason
+
     if not EMAIL_REGEX.fullmatch(email):
         return False, "Invalid email format."
 
@@ -678,9 +852,6 @@ def validate_email_basic(email):
 
     if ".." in local or local.startswith(".") or local.endswith("."):
         return False, "Invalid email format."
-
-    if email_domain_is_blocked(domain):
-        return False, "Temporary or fake email domains are not allowed."
 
     if not email_domain_format_ok(domain):
         return False, "Invalid email domain."
@@ -934,6 +1105,20 @@ def login_required(func):
             session.clear()
             flash("Account not found in the Discord database. Please login again.", "error")
             return redirect(url_for("home", view="login"))
+
+        blocked_reason = blocked_email_reason(user.get("email", current_email()))
+        if blocked_reason:
+            try:
+                store = load_store(force=True)
+                db = store["db"]
+                uid = user.get("id") or current_user_id()
+                delete_user_and_content(db, uid)
+                save_db(db)
+            except Exception:
+                pass
+            session.clear()
+            flash("This email is blocked. The account was deleted.", "error")
+            return redirect(url_for("home", view="register"))
 
         return func(*args, **kwargs)
 
@@ -2470,6 +2655,16 @@ def home():
         flash("Account not found. Please login again.", "error")
         return redirect(url_for("home", view="login"))
 
+    blocked_reason = blocked_email_reason(user.get("email", current_email()))
+    if blocked_reason:
+        try:
+            delete_user_and_content(db, user.get("id") or current_user_id())
+            save_db(db)
+        except Exception:
+            pass
+        session.clear()
+        flash("This email is blocked. The account was deleted.", "error")
+        return redirect(url_for("home", view="register"))
 
     state = build_client_state(db, store, user)
 
@@ -2515,7 +2710,17 @@ def register():
 
     email_ok, email_reason = validate_email_basic(email)
     if not email_ok:
-        flash(email_reason, "error")
+        # If an old account already exists with a blocked/temp/fake email, delete it now.
+        uid, old_user = find_user_by_email(db, email)
+        if uid and blocked_email_reason(email):
+            try:
+                delete_user_and_content(db, uid)
+                save_db(db)
+                flash("This email is blocked. The old account was deleted.", "error")
+            except Exception as e:
+                flash(f"This email is blocked, but deletion failed: {e}", "error")
+        else:
+            flash(email_reason, "error")
         return redirect(url_for("home", view="register"))
 
     if len(password) < 6:
@@ -2639,6 +2844,19 @@ def login():
     password = request.form.get("password", "")
 
     uid, user = find_user_by_email(db, email)
+
+    if blocked_email_reason(email):
+        if uid and user:
+            try:
+                delete_user_and_content(db, uid)
+                save_db(db)
+                session.clear()
+                flash("This email is blocked. The account was deleted.", "error")
+            except Exception as e:
+                flash(f"This email is blocked, but deletion failed: {e}", "error")
+        else:
+            flash("This email is blocked. Temporary, fake, privacy, or blocked email domains are not allowed.", "error")
+        return redirect(url_for("home", view="register"))
 
     if not user:
         flash("Account not found. Check the email or create an account first.", "error")
@@ -3294,6 +3512,13 @@ def live_state():
         if not user:
             return jsonify({"ok": False, "error": "Account not found"}), 401
 
+        blocked_reason = blocked_email_reason(user.get("email", current_email()))
+        if blocked_reason:
+            delete_user_and_content(db, user.get("id") or current_user_id())
+            save_db(db)
+            session.clear()
+            return jsonify({"ok": False, "error": "This email is blocked. Account deleted."}), 401
+
         state = build_client_state(db, store, user)
         state["ok"] = True
         return jsonify(state)
@@ -3328,6 +3553,29 @@ def notifications_read():
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/purge-blocked-emails")
+def purge_blocked_emails_route():
+    try:
+        store = load_store(force=True)
+        db = store["db"]
+        deleted = purge_blocked_email_accounts(db)
+        if deleted:
+            save_db(db)
+
+        lines = [
+            "BLOCKED EMAIL PURGE COMPLETE",
+            f"Deleted accounts: {len(deleted)}",
+            "",
+        ]
+        for item in deleted[:50]:
+            lines.append(f"- {item.get('username')} | {item.get('email')} | {item.get('reason')}")
+        if len(deleted) > 50:
+            lines.append(f"...and {len(deleted) - 50} more")
+        return "<br>".join(lines)
+    except Exception as e:
+        return f"BLOCKED EMAIL PURGE ERROR: {e}"
 
 
 @app.route("/discord-test")
