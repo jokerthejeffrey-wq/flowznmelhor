@@ -1828,6 +1828,22 @@ audio::-webkit-media-controls-panel{
     <textarea name="body" placeholder="comment under this file" required></textarea>
     <button class="primary" type="submit">comment</button>
 </form>
+                        <br>
+<div class="meta">{{ file.comments|length }} file comments</div>
+
+{% for comment in file.comments[:2] %}
+    <div class="row" style="margin-left:18px;">
+        <div class="meta">
+            <a href="/?view=profile&id={{ comment.author_id }}">{{ comment.author }}</a>
+        </div>
+        <div class="small body-text">{{ comment.body }}</div>
+    </div>
+{% endfor %}
+
+<form action="/file-comment/{{ file.id }}" method="POST" style="margin-top:12px;">
+    <textarea name="body" placeholder="comment under this file" required></textarea>
+    <button class="primary" type="submit">comment</button>
+</form>
                     </div>
                 {% endfor %}
             </div>
@@ -2829,6 +2845,54 @@ def add_topic():
     flash("Topic added.", "success")
     return go("topic", topic_id)
 
+
+@app.route("/comment/<topic_id>", methods=["POST"])
+@login_required
+def add_comment(topic_id):
+    store = load_store(force=True)
+    db = store["db"]
+    user = db["users"].get(current_user_id())
+
+    if topic_id not in db["topics"]:
+        flash("Topic not found.", "error")
+        return go("discussion")
+
+    left = cooldown_left(user, "last_comment_at", COMMENT_COOLDOWN_SECONDS)
+
+    if left > 0:
+        flash(f"Slow down. You can comment again in {left} seconds.", "error")
+        return go("topic", topic_id)
+
+    body = request.form.get("body", "").strip()
+
+    if not body:
+        flash("Comment cannot be empty.", "error")
+        return go("topic", topic_id)
+
+    comment_id = secrets.token_hex(12)
+
+    comment = {
+        "id": comment_id,
+        "topic_id": topic_id,
+        "body": body[:900],
+        "author": user.get("username"),
+        "author_id": user.get("id"),
+        "created": int(time.time()),
+    }
+
+    db["comments"][comment_id] = comment
+    user["last_comment_at"] = int(time.time())
+    db["users"][user["id"]] = user
+
+    try:
+        save_db(db)
+        clear_cache()
+    except Exception as e:
+        flash(f"Could not save comment to Discord DB: {e}", "error")
+        return go("topic", topic_id)
+
+    flash("Comment added.", "success")
+    return go("topic", topic_id)
 
 
 @app.route("/file-comment/<file_id>", methods=["POST"])
