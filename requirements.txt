@@ -6,3 +6,4 @@ requests
 flask_sqlalchemy
 psycopg2-binary
 werkzeug
+dns
