@@ -140,6 +140,13 @@ LIVE_POLL_MS = int(os.environ.get("LIVE_POLL_MS", "30000"))
 CACHE = {"time": 0, "store": None}
 ATTACHMENT_CACHE = {"items": {}}
 
+# Keeps the storage channel clean:
+# after every successful DB save, old DB snapshot messages are deleted.
+# Keep at least 1 so the website always has a current database snapshot.
+DB_SNAPSHOT_KEEP = max(1, int(os.environ.get("DB_SNAPSHOT_KEEP", "3")))
+DB_SNAPSHOT_DELETE_LIMIT = max(1, int(os.environ.get("DB_SNAPSHOT_DELETE_LIMIT", "25")))
+AUTO_DELETE_OLD_SNAPSHOTS = os.environ.get("AUTO_DELETE_OLD_SNAPSHOTS", "1").strip().lower() not in {"0", "false", "no", "off"}
+
 CREDITS = {
     "OWNERS": ["DJ TUTTER", "DJ LIRA DA ZL"],
     "MEMBERS": ["DJ FRG 011", "DJ PLT 011", "DJ RGLX", "DJ RDC", "DJ SABA 7", "DJ RE7 013", "RSFI", "DJ RDC"],
@@ -176,6 +183,7 @@ def blank_db():
         "file_comments": {},
         "files": {},
         "dms": {},
+        "ip_bans": {},
         "created_at": now_ms(),
         "updated_at": now_ms(),
     }
@@ -188,7 +196,7 @@ def normalize_db(db):
     clean = blank_db()
     clean.update(db)
 
-    for key in ["users", "topics", "comments", "file_comments", "files", "dms"]:
+    for key in ["users", "topics", "comments", "file_comments", "files", "dms", "ip_bans"]:
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
@@ -766,6 +774,70 @@ def post_discord_attachment(content, filename, file_bytes, content_type):
     return r.json()
 
 
+def delete_service_message(message_id):
+    if not message_id:
+        return False
+
+    try:
+        discord_request("DELETE", f"/channels/{DISCORD_DB_CHANNEL_ID}/messages/{message_id}")
+        return True
+    except Exception:
+        return False
+
+
+def cleanup_old_db_snapshots(keep=None, delete_limit=None):
+    """
+    Deletes old database snapshot messages only.
+
+    It never deletes:
+    - uploaded files
+    - profile pictures
+    - MP3/ZIP/image attachments
+
+    It only deletes messages whose content starts with SWDBSNAP|.
+    """
+    if keep is None:
+        keep = DB_SNAPSHOT_KEEP
+    if delete_limit is None:
+        delete_limit = DB_SNAPSHOT_DELETE_LIMIT
+
+    keep = max(1, int(keep))
+    delete_limit = max(1, int(delete_limit))
+
+    try:
+        messages = fetch_discord_messages(max_pages=20, stop_after_snapshot=False)
+    except Exception:
+        return {"ok": False, "deleted": 0, "kept": 0, "error": "could not scan old snapshots"}
+
+    snapshots = []
+    for msg in messages:
+        content = msg.get("content", "") or ""
+        if content.startswith("SWDBSNAP|"):
+            snapshots.append(msg)
+
+    # Newest Discord messages have bigger snowflake IDs.
+    snapshots.sort(key=lambda m: int(m.get("id", "0")), reverse=True)
+
+    to_keep = snapshots[:keep]
+    to_delete = snapshots[keep:keep + delete_limit]
+
+    deleted = 0
+    for msg in to_delete:
+        if delete_service_message(msg.get("id", "")):
+            deleted += 1
+            time.sleep(0.25)
+
+    if deleted:
+        clear_cache()
+
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "kept": len(to_keep),
+        "total_snapshots_found": len(snapshots),
+    }
+
+
 def cache_attachment(kind, key, info):
     if not key or not info or not best_attachment_url(info):
         return
@@ -878,11 +950,15 @@ def save_db(db):
         raise ValueError("Saved content is too large even after compression. Delete old snapshots or raise MAX_DB_SIZE.")
 
     post_discord_attachment(
-        content=f"SWDBSNAP|v17quiet|gz|{int(time.time())}",
+        content=f"SWDBSNAP|v18quietclean|gz|{int(time.time())}",
         filename="smartweb-db.json.gz",
         file_bytes=raw,
         content_type="application/gzip",
     )
+
+    if AUTO_DELETE_OLD_SNAPSHOTS:
+        cleanup_old_db_snapshots(keep=DB_SNAPSHOT_KEEP, delete_limit=DB_SNAPSHOT_DELETE_LIMIT)
+
     clear_cache()
 
 
@@ -1247,6 +1323,95 @@ def scan_profile_picture(filename, file_bytes):
     return True, "Image passed basic safety check."
 
 
+def get_client_ip():
+    """
+    Real visitor IP on Render / proxy hosts.
+    Uses X-Forwarded-For first because Render runs behind a proxy.
+    """
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        ip = forwarded.split(",", 1)[0].strip()
+        if ip:
+            return ip
+
+    cf_ip = request.headers.get("CF-Connecting-IP", "").strip()
+    if cf_ip:
+        return cf_ip
+
+    real_ip = request.headers.get("X-Real-IP", "").strip()
+    if real_ip:
+        return real_ip
+
+    return request.remote_addr or ""
+
+
+def normalize_ip(ip):
+    return str(ip or "").strip()
+
+
+def remember_user_ip(user):
+    if not isinstance(user, dict):
+        return user
+
+    ip = normalize_ip(get_client_ip())
+    if not ip:
+        return user
+
+    user["last_ip"] = ip
+    user["last_ip_at"] = int(time.time())
+
+    history = user.get("ip_history", [])
+    if not isinstance(history, list):
+        history = []
+
+    if ip not in history:
+        history.insert(0, ip)
+
+    user["ip_history"] = history[:10]
+    return user
+
+
+def ip_is_banned(db, ip):
+    db = normalize_db(db)
+    ip = normalize_ip(ip)
+    if not ip:
+        return False, None
+
+    ban = db.get("ip_bans", {}).get(ip)
+    if isinstance(ban, dict):
+        return True, ban
+
+    return False, None
+
+
+def add_ip_ban(db, ip, reason="", banned_user_id=""):
+    db = normalize_db(db)
+    ip = normalize_ip(ip)
+
+    if not ip:
+        return False, "No IP address."
+
+    db.setdefault("ip_bans", {})
+    db["ip_bans"][ip] = {
+        "ip": ip,
+        "reason": clean_simple_text(reason, 300) if "clean_simple_text" in globals() else str(reason or "")[:300],
+        "banned_user_id": str(banned_user_id or ""),
+        "by": current_email() or "",
+        "created": int(time.time()),
+    }
+
+    return True, ""
+
+
+def remove_ip_ban(db, ip):
+    db = normalize_db(db)
+    ip = normalize_ip(ip)
+    db.setdefault("ip_bans", {})
+    existed = ip in db["ip_bans"]
+    db["ip_bans"].pop(ip, None)
+    return existed
+
+
 def current_email():
     return session.get("email")
 
@@ -1350,6 +1515,47 @@ def pfp_url_from_user(user, store=None):
 
     # Do not scan Discord here. Just return the route; /pfp resolves the attachment lazily.
     return url_for("profile_picture", user_id=user.get("id", ""), v=user.get("pfp_updated", 0))
+
+
+@app.before_request
+def block_banned_ips():
+    # Creator can always enter, even if testing from a banned IP.
+    if current_is_creator():
+        return None
+
+    # Do not block static/browser favicon requests before DB loads.
+    path = request.path or ""
+    if path in {"/favicon.ico"}:
+        return None
+
+    ip = normalize_ip(get_client_ip())
+    if not ip:
+        return None
+
+    try:
+        db = load_store()["db"]
+        banned, ban = ip_is_banned(db, ip)
+    except Exception:
+        # If DB is temporarily unavailable, do not block the whole site.
+        return None
+
+    if banned:
+        reason = ""
+        if isinstance(ban, dict):
+            reason = ban.get("reason", "")
+
+        return (
+            "<!doctype html><html><head><title>blocked</title>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<style>body{background:#050505;color:#fff;font-family:Arial;padding:40px}"
+            ".box{max-width:520px;border:1px solid #333;padding:22px}</style></head>"
+            "<body><div class='box'><h2>access blocked</h2>"
+            "<p>this connection is blocked from this site.</p>"
+            f"<p style='color:#888'>{reason}</p>"
+            "</div></body></html>"
+        ), 403
+
+    return None
 
 
 def valid_username(username):
@@ -3153,6 +3359,7 @@ def register():
                 existing_user["last_username_change_at"] = int(time.time())
             # If cooldown is active, keep the old username but still open the account.
 
+        existing_user = remember_user_ip(existing_user)
         existing_user["updated_at"] = int(time.time())
         db["users"][existing_uid] = existing_user
 
@@ -3197,6 +3404,7 @@ def register():
         "updated_at": int(time.time()),
     }
 
+    user = remember_user_ip(user)
     db["users"][user_id] = user
 
     try:
@@ -3248,6 +3456,16 @@ def login():
 
     if not user.get("id"):
         user["id"] = uid
+
+    old_ip = user.get("last_ip", "")
+    user = remember_user_ip(user)
+    db["users"][uid] = user
+
+    if user.get("last_ip", "") != old_ip:
+        try:
+            save_db(db)
+        except Exception:
+            pass
 
     session["email"] = normalize_email(user.get("email", email))
     session["user_id"] = uid
@@ -3982,6 +4200,243 @@ def purge_blocked_emails_route():
         return "<br>".join(lines)
     except Exception as e:
         return f"BLOCKED EMAIL PURGE ERROR: {e}"
+
+
+@app.route("/creator-ip-bans", methods=["GET", "POST"])
+@login_required
+def creator_ip_bans_route():
+    user = current_user()
+
+    if not user_is_creator(user):
+        return "Only creator can use IP bans.", 403
+
+    try:
+        store = load_store(force=True)
+        db = store["db"]
+    except Exception as e:
+        return f"Could not load DB: {e}", 500
+
+    message = ""
+
+    if request.method == "POST":
+        action = request.form.get("action", "").strip()
+        reason = request.form.get("reason", "").strip()
+
+        if action == "ban_ip":
+            ip = normalize_ip(request.form.get("ip", ""))
+            ok, err = add_ip_ban(db, ip, reason)
+            if ok:
+                save_db(db)
+                message = f"IP banned: {ip}"
+            else:
+                message = err
+
+        elif action == "ban_user":
+            target = request.form.get("target", "").strip()
+            target_uid = ""
+            target_user = None
+
+            if target in db.get("users", {}):
+                target_uid = target
+                target_user = db["users"].get(target_uid)
+            else:
+                target_uid, target_user = find_user_by_email(db, target)
+
+            if not target_user:
+                # Also search by username.
+                for uid, u in db.get("users", {}).items():
+                    if str(u.get("username", "")).lower() == target.lower():
+                        target_uid = uid
+                        target_user = u
+                        break
+
+            if not target_user:
+                message = "User not found."
+            else:
+                ip = normalize_ip(target_user.get("last_ip", ""))
+                if not ip:
+                    message = "That user has no saved IP yet. They must login once after this update."
+                else:
+                    ok, err = add_ip_ban(
+                        db,
+                        ip,
+                        reason or f"banned user {target_user.get('username', target_uid)}",
+                        banned_user_id=target_uid,
+                    )
+                    if ok:
+                        save_db(db)
+                        message = f"User IP banned: {target_user.get('username')} | {ip}"
+                    else:
+                        message = err
+
+        elif action == "unban_ip":
+            ip = normalize_ip(request.form.get("ip", ""))
+            remove_ip_ban(db, ip)
+            save_db(db)
+            message = f"IP unbanned: {ip}"
+
+    db = normalize_db(db)
+    bans = db.get("ip_bans", {})
+    users = db.get("users", {})
+
+    ban_rows = ""
+    for ip, ban in sorted(bans.items(), key=lambda x: str(x[0])):
+        reason = ban.get("reason", "") if isinstance(ban, dict) else ""
+        created = ban.get("created", "") if isinstance(ban, dict) else ""
+        banned_user_id = ban.get("banned_user_id", "") if isinstance(ban, dict) else ""
+        banned_user = users.get(banned_user_id, {}) if banned_user_id else {}
+        banned_name = banned_user.get("username", "")
+
+        ban_rows += f"""
+        <div class="row">
+            <b>{ip}</b>
+            <small>{reason}</small>
+            <small>{banned_name}</small>
+            <form method="POST">
+                <input type="hidden" name="action" value="unban_ip">
+                <input type="hidden" name="ip" value="{ip}">
+                <button>unban</button>
+            </form>
+        </div>
+        """
+
+    if not ban_rows:
+        ban_rows = "<p class='muted'>No banned IPs yet.</p>"
+
+    recent_users = ""
+    for uid, u in sorted(users.items(), key=lambda x: int(x[1].get("last_ip_at", 0) or 0), reverse=True)[:80]:
+        username = u.get("username", "")
+        email = u.get("email", "")
+        ip = u.get("last_ip", "")
+        if not ip:
+            continue
+
+        recent_users += f"""
+        <div class="row">
+            <b>{username}</b>
+            <small>{email}</small>
+            <small>{ip}</small>
+            <form method="POST">
+                <input type="hidden" name="action" value="ban_user">
+                <input type="hidden" name="target" value="{uid}">
+                <input name="reason" placeholder="reason" value="creator ban">
+                <button>ban ip</button>
+            </form>
+        </div>
+        """
+
+    if not recent_users:
+        recent_users = "<p class='muted'>No user IPs saved yet. Users need to login once after this update.</p>"
+
+    return f"""
+    <!doctype html>
+    <html>
+    <head>
+        <title>creator ip bans</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>
+            body{{background:#070707;color:#f5f5f5;font-family:Arial;margin:0;padding:24px}}
+            a{{color:#7ee7ff}}
+            input,button{{background:#111;color:white;border:1px solid #444;padding:10px;margin:4px}}
+            button{{cursor:pointer;font-weight:800}}
+            .box{{max-width:900px;margin:auto}}
+            .panel{{border:1px solid #333;padding:16px;margin:16px 0;background:#0c0c0c}}
+            .row{{display:grid;grid-template-columns:1.3fr 1.7fr 1fr 1.5fr;gap:8px;align-items:center;border-top:1px solid #222;padding:10px 0}}
+            small,.muted{{color:#999}}
+            @media(max-width:800px){{.row{{grid-template-columns:1fr}}}}
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h1>creator ip bans</h1>
+            <p><a href="/">back to site</a></p>
+            <p style="color:#7ee7ff">{message}</p>
+
+            <div class="panel">
+                <h2>ban ip manually</h2>
+                <form method="POST">
+                    <input type="hidden" name="action" value="ban_ip">
+                    <input name="ip" placeholder="IP address" required>
+                    <input name="reason" placeholder="reason" value="creator ban">
+                    <button>ban ip</button>
+                </form>
+            </div>
+
+            <div class="panel">
+                <h2>banned ips</h2>
+                {ban_rows}
+            </div>
+
+            <div class="panel">
+                <h2>recent user ips</h2>
+                {recent_users}
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/creator-ip-ban/<user_id>", methods=["GET", "POST"])
+@login_required
+def creator_ip_ban_user_route(user_id):
+    user = current_user()
+
+    if not user_is_creator(user):
+        return "Only creator can use IP bans.", 403
+
+    store = load_store(force=True)
+    db = store["db"]
+
+    target = db.get("users", {}).get(user_id)
+    if not target:
+        return "User not found.", 404
+
+    ip = normalize_ip(target.get("last_ip", ""))
+    if not ip:
+        return "That user has no saved IP yet. They must login once after this update.", 400
+
+    ok, err = add_ip_ban(
+        db,
+        ip,
+        f"banned user {target.get('username', user_id)}",
+        banned_user_id=user_id,
+    )
+
+    if not ok:
+        return err, 400
+
+    save_db(db)
+    return redirect(url_for("creator_ip_bans_route"))
+
+
+@app.route("/cleanup-snapshots")
+@login_required
+def cleanup_snapshots_route():
+    user = current_user()
+
+    if not user_is_creator(user):
+        return "Only the creator can clean old snapshots.", 403
+
+    try:
+        keep = int(request.args.get("keep", DB_SNAPSHOT_KEEP))
+    except Exception:
+        keep = DB_SNAPSHOT_KEEP
+
+    try:
+        limit = int(request.args.get("limit", 100))
+    except Exception:
+        limit = 100
+
+    result = cleanup_old_db_snapshots(keep=max(1, keep), delete_limit=max(1, limit))
+
+    return (
+        "SNAPSHOT CLEANUP FINISHED<br>"
+        f"Kept newest snapshots: {result.get('kept', 0)}<br>"
+        f"Deleted old snapshots: {result.get('deleted', 0)}<br>"
+        f"Total snapshots found: {result.get('total_snapshots_found', 0)}<br>"
+        "Only old DB snapshots were deleted. Files/images/audio were not deleted."
+    )
 
 
 @app.route("/discord-test")
