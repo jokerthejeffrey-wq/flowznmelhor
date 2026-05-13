@@ -146,6 +146,22 @@ CREDITS = {
     "WEBSITE MADE BY": ["DJ SABA 7"],
 }
 
+# Website control roles
+# Creator can control/delete everything.
+CREATOR_EMAIL = os.environ.get("CREATOR_EMAIL", "tuna.iren@outlook.com").strip().lower()
+
+# Add moderator emails here later, for example:
+# MOD_EMAILS = ["mod1@gmail.com", "mod2@gmail.com"]
+MOD_EMAILS = []
+
+# Optional Render env support:
+# MOD_EMAILS=mod1@gmail.com,mod2@gmail.com
+MOD_EMAILS_ENV = os.environ.get("MOD_EMAILS", "").strip()
+if MOD_EMAILS_ENV:
+    MOD_EMAILS = [x.strip().lower() for x in MOD_EMAILS_ENV.split(",") if x.strip()]
+else:
+    MOD_EMAILS = [x.strip().lower() for x in MOD_EMAILS if x.strip()]
+
 
 def now_ms():
     return int(time.time() * 1000)
@@ -1273,6 +1289,43 @@ def current_user():
     return None
 
 
+def is_creator_email(email):
+    return normalize_email(email) == CREATOR_EMAIL
+
+
+def is_mod_email(email):
+    return normalize_email(email) in MOD_EMAILS
+
+
+def is_staff_email(email):
+    email = normalize_email(email)
+    return email == CREATOR_EMAIL or email in MOD_EMAILS
+
+
+def current_is_creator():
+    return is_creator_email(current_email())
+
+
+def current_is_mod():
+    return is_mod_email(current_email())
+
+
+def current_is_staff():
+    return is_staff_email(current_email())
+
+
+def user_is_creator(user):
+    return bool(user and is_creator_email(user.get("email", "")))
+
+
+def user_is_mod(user):
+    return bool(user and is_mod_email(user.get("email", "")))
+
+
+def user_is_staff(user):
+    return bool(user and is_staff_email(user.get("email", "")))
+
+
 def username_from_id(uid, db=None, fallback="unknown"):
     if not uid:
         return fallback
@@ -1377,7 +1430,7 @@ def public_file(file_data, db=None):
         "is_image": is_image,
         "stream_url": url_for("stream_file", file_id=file_id) if is_audio else "",
         "preview_url": url_for("preview_file", file_id=file_id) if is_image else "",
-        "can_delete": viewer_id == file_data.get("author_id", ""),
+        "can_delete": viewer_id == file_data.get("author_id", "") or current_is_staff(),
         "comments": [
             {
                 "id": c.get("id", ""),
@@ -1408,7 +1461,7 @@ def public_topic(topic_data, db=None):
         "author": username_from_id(author_id, db, topic_data.get("author", "unknown")),
         "author_id": author_id,
         "created": int(topic_data.get("created", 0)),
-        "can_delete": viewer_id == author_id,
+        "can_delete": viewer_id == author_id or current_is_staff(),
         "comments": [
             {
                 "id": c.get("id", ""),
@@ -1424,11 +1477,18 @@ def public_topic(topic_data, db=None):
 
 def public_user(user, db, store, viewer_id):
     uid = user.get("id", "")
+    role = "member"
+    if user_is_creator(user):
+        role = "creator"
+    elif user_is_mod(user):
+        role = "mod"
+
     return {
         "id": uid,
         "username": user.get("username", "unknown"),
         "email": user.get("email", "") if uid == viewer_id else "",
         "about": user.get("about", ""),
+        "role": role,
         "joined": int(user.get("created", 0)),
         "pfp_url": pfp_url_from_user(user, store),
         "topic_count": len([t for t in db["topics"].values() if t.get("author_id") == uid]),
@@ -1592,6 +1652,9 @@ def build_client_state(db, store, user):
         "db_updated_at": int(db.get("updated_at", 0)),
         "username": user.get("username", user.get("email", "")),
         "pfp_url": pfp_url_from_user(user, store),
+        "is_creator": user_is_creator(user),
+        "is_mod": user_is_mod(user),
+        "is_staff": user_is_staff(user),
     }
 
 
@@ -1685,6 +1748,7 @@ body{
 }
 .file-link:hover,.topic-open:hover,.fake-link:hover,.name-link:hover{color:white;text-decoration:underline}
 .form-box{margin-top:34px;border-left:1px solid var(--line);padding-left:24px;max-width:740px}
+.top-form{margin-top:0;margin-bottom:28px;border-left:1px solid var(--line);padding-left:24px;max-width:740px}
 input,textarea{
     background:transparent;color:white;border:none;border-bottom:1px solid var(--line);
     padding:13px 0;outline:none;font-size:14px;
@@ -1894,6 +1958,9 @@ const userEmail = {{ user_email|tojson }};
 const username = {{ username|tojson }};
 const currentUserId = {{ current_user_id|tojson }};
 let pfpUrl = {{ pfp_url|tojson }};
+const isCreator = {{ is_creator|tojson }};
+const isMod = {{ is_mod|tojson }};
+const isStaff = {{ is_staff|tojson }};
 const startView = {{ start_view|tojson }};
 const startTopicId = {{ start_item_id|tojson }};
 const maxFileMb = {{ max_file_mb|tojson }};
@@ -2090,6 +2157,11 @@ function showDashboard(button){
                 ${filePreviewHtml(file)}
                 <a class="file-link" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
                 <span class="topic-open" onclick="openFile('${file.id}')" style="margin-left:12px;">open file post</span>
+                ${file.can_delete ? `
+                    <form action="/delete-file/${file.id}" method="POST" style="display:inline-block;margin-left:12px;" onsubmit="return confirm('Delete this file post?')">
+                        <button class="danger-btn" type="submit">delete</button>
+                    </form>
+                ` : ""}
                 ${audioPlayerHtml(file)}
             </div>
         `;
@@ -2127,6 +2199,18 @@ function showFiles(button){
     let html=`
         <div class="page-title">files</div>
         <div class="page-sub">Upload ZIP packs, MP3 previews, or image posts. Images show directly in the files feed.</div>
+
+        <div class="top-form">
+            <form action="/upload" method="POST" enctype="multipart/form-data">
+                <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3,.png,.jpg,.jpeg,.webp,.gif" required hidden>
+                <label for="fileInput" class="file-button">select file</label>
+                <span id="fileName" class="selected-file">no file selected</span>
+                <br><br>
+                <button class="primary-btn" type="submit">upload file</button>
+            </form>
+            <p class="small">allowed: zip, mp3, png, jpg, jpeg, webp, gif. maximum size: ${maxFileMb} MB. Images are lightly compressed before upload. Upload cooldown: 60 seconds.</p>
+        </div>
+
         <input id="searchInput" class="search-bar" placeholder="search files" oninput="filterFiles()">
         <div class="line">
     `;
@@ -2147,16 +2231,6 @@ function showFiles(button){
     });
 
     html+=`
-        </div>
-        <div class="form-box">
-            <form action="/upload" method="POST" enctype="multipart/form-data">
-                <input id="fileInput" type="file" name="uploadfile" accept=".zip,.mp3,.png,.jpg,.jpeg,.webp,.gif" required hidden>
-                <label for="fileInput" class="file-button">select file</label>
-                <span id="fileName" class="selected-file">no file selected</span>
-                <br><br>
-                <button class="primary-btn" type="submit">upload file</button>
-            </form>
-            <p class="small">allowed: zip, mp3, png, jpg, jpeg, webp, gif. maximum size: ${maxFileMb} MB. Images are lightly compressed before upload. Upload cooldown: 60 seconds.</p>
         </div>
     `;
 
@@ -2187,6 +2261,11 @@ function openFile(fileId){
         <div class="page-sub">by ${nameLink(file.author_id, file.author)} · ${escapeHtml(file.size)}</div>
         <button onclick="showFiles(document.getElementById('menuFiles'))">back to files</button>
         <a class="btn" href="/download/${encodeURIComponent(file.id)}" target="_blank">download</a>
+        ${file.can_delete ? `
+            <form action="/delete-file/${file.id}" method="POST" style="display:inline-block;margin-left:12px;" onsubmit="return confirm('Delete this file post?')">
+                <button class="danger-btn" type="submit">delete file post</button>
+            </form>
+        ` : ""}
         <br><br>
         <div class="line">
             ${filePreviewHtml(file, true)}
@@ -2230,6 +2309,17 @@ function showDiscussion(button){
     let html=`
         <div class="page-title">discussion</div>
         <div class="page-sub">Share things, speak, and create topics.</div>
+
+        <div class="top-form">
+            <form action="/topic" method="POST">
+                <input name="title" placeholder="topic title" required style="width:100%;">
+                <textarea name="body" placeholder="write topic text" required></textarea>
+                <br><br>
+                <button class="primary-btn" type="submit">add topic</button>
+            </form>
+            <p class="small">post cooldown: ${POST_COOLDOWN_TEXT}</p>
+        </div>
+
         <input id="discussionSearchInput" class="search-bar" placeholder="search discussions" oninput="filterDiscussions()">
         <div class="line">
     `;
@@ -2250,15 +2340,6 @@ function showDiscussion(button){
     });
 
     html+=`
-        </div>
-        <div class="form-box">
-            <form action="/topic" method="POST">
-                <input name="title" placeholder="topic title" required style="width:100%;">
-                <textarea name="body" placeholder="write topic text" required></textarea>
-                <br><br>
-                <button class="primary-btn" type="submit">add topic</button>
-            </form>
-            <p class="small">post cooldown: ${POST_COOLDOWN_TEXT}</p>
         </div>
     `;
 
@@ -2413,7 +2494,7 @@ function openProfile(userId){
                 ${smallPfp(u)}
                 <div>
                     <div class="login-card-title">${escapeHtml(u.username)}</div>
-                    <div class="login-card-sub">${u.id === currentUserId ? escapeHtml(u.email) : "member profile"}</div>
+                    <div class="login-card-sub">${u.id === currentUserId ? escapeHtml(u.email) : "member profile"}${u.role === "creator" ? " · creator" : (u.role === "mod" ? " · mod" : "")}</div>
                 </div>
             </div>
             <div class="grid">
@@ -2550,7 +2631,7 @@ function showAccount(button){
                     ${pfpHtml()}
                     <div>
                         <div class="login-card-title">${escapeHtml(username)}</div>
-                        <div class="login-card-sub">${escapeHtml(userEmail)}</div>
+                        <div class="login-card-sub">${escapeHtml(userEmail)}${isCreator ? " · creator" : (isMod ? " · mod" : "")}</div>
                     </div>
                 </div>
 
@@ -2861,6 +2942,9 @@ def home():
             username="",
             current_user_id="",
             pfp_url="",
+            is_creator=False,
+            is_mod=False,
+            is_staff=False,
             start_view="login",
             start_item_id="",
             auth_mode=auth_mode,
@@ -2928,6 +3012,9 @@ def home():
         username=user.get("username", user.get("email", "")),
         current_user_id=user.get("id", ""),
         pfp_url=pfp_url_from_user(user, store),
+        is_creator=state.get("is_creator", False),
+        is_mod=state.get("is_mod", False),
+        is_staff=state.get("is_staff", False),
         start_view=requested_view,
         start_item_id=requested_id,
         auth_mode=auth_mode,
@@ -3697,8 +3784,8 @@ def delete_topic_route(topic_id):
         flash("Topic not found.", "error")
         return go("discussion")
 
-    if topic.get("author_id") != user.get("id"):
-        flash("You can only delete your own posts.", "error")
+    if topic.get("author_id") != user.get("id") and not user_is_staff(user):
+        flash("Only the post owner or staff can delete this post.", "error")
         return go("topic", topic_id)
 
     db["topics"].pop(topic_id, None)
@@ -3715,6 +3802,38 @@ def delete_topic_route(topic_id):
 
     flash("Post deleted.", "success")
     return go("discussion")
+
+
+@app.route("/delete-file/<file_id>", methods=["POST"])
+@login_required
+def delete_file_route(file_id):
+    store = load_store(force=True)
+    db = store["db"]
+    user = db["users"].get(current_user_id())
+    file_data = db["files"].get(file_id)
+
+    if not file_data:
+        flash("File post not found.", "error")
+        return go("files")
+
+    if file_data.get("author_id") != user.get("id") and not user_is_staff(user):
+        flash("Only the file owner or staff can delete this file post.", "error")
+        return go("file", file_id)
+
+    db["files"].pop(file_id, None)
+
+    for comment_id in list(db.get("file_comments", {}).keys()):
+        if db["file_comments"][comment_id].get("file_id") == file_id:
+            db["file_comments"].pop(comment_id, None)
+
+    try:
+        save_db(db)
+    except Exception as e:
+        flash(f"Could not delete file post: {e}", "error")
+        return go("file", file_id)
+
+    flash("File post deleted.", "success")
+    return go("files")
 
 
 @app.route("/send-dm/<target_id>", methods=["POST"])
