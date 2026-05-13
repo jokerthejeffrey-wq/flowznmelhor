@@ -4,6 +4,7 @@ import json
 import gzip
 import time
 import hashlib
+import html
 import secrets
 import zipfile
 from io import BytesIO
@@ -184,6 +185,7 @@ def blank_db():
         "files": {},
         "dms": {},
         "ip_bans": {},
+        "username_bans": {},
         "created_at": now_ms(),
         "updated_at": now_ms(),
     }
@@ -196,7 +198,7 @@ def normalize_db(db):
     clean = blank_db()
     clean.update(db)
 
-    for key in ["users", "topics", "comments", "file_comments", "files", "dms", "ip_bans"]:
+    for key in ["users", "topics", "comments", "file_comments", "files", "dms", "ip_bans", "username_bans"]:
         if not isinstance(clean.get(key), dict):
             clean[key] = {}
 
@@ -1412,6 +1414,65 @@ def remove_ip_ban(db, ip):
     return existed
 
 
+def normalize_username_for_ban(username):
+    return str(username or "").strip().lower()
+
+
+def username_is_banned(db, username):
+    db = normalize_db(db)
+    username_key = normalize_username_for_ban(username)
+    if not username_key:
+        return False, None
+
+    ban = db.get("username_bans", {}).get(username_key)
+    if isinstance(ban, dict):
+        return True, ban
+
+    return False, None
+
+
+def add_username_ban(db, username, reason="", banned_user_id=""):
+    db = normalize_db(db)
+    username_key = normalize_username_for_ban(username)
+
+    if not username_key:
+        return False, "No username."
+
+    db.setdefault("username_bans", {})
+    db["username_bans"][username_key] = {
+        "username": username_key,
+        "reason": str(reason or "")[:300],
+        "banned_user_id": str(banned_user_id or ""),
+        "by": current_email() or "",
+        "created": int(time.time()),
+    }
+
+    return True, ""
+
+
+def remove_username_ban(db, username):
+    db = normalize_db(db)
+    username_key = normalize_username_for_ban(username)
+    db.setdefault("username_bans", {})
+    existed = username_key in db["username_bans"]
+    db["username_bans"].pop(username_key, None)
+    return existed
+
+
+def find_user_by_username(db, username):
+    username_key = normalize_username_for_ban(username)
+    if not username_key:
+        return None, None
+
+    for uid, user in db.get("users", {}).items():
+        if normalize_username_for_ban(user.get("username", "")) == username_key:
+            if not user.get("id"):
+                user["id"] = uid
+            return uid, user
+
+    return None, None
+
+
 def current_email():
     return session.get("email")
 
@@ -1555,6 +1616,37 @@ def block_banned_ips():
             "</div></body></html>"
         ), 403
 
+    # If a logged-in account has a banned username, remove it and block it.
+    try:
+        email = current_email()
+        if email:
+            uid = session.get("user_id", "")
+            user = db.get("users", {}).get(uid) if uid else None
+
+            if not user:
+                uid, user = find_user_by_email(db, email)
+
+            if user:
+                username_banned, username_ban = username_is_banned(db, user.get("username", ""))
+                if username_banned:
+                    reason = username_ban.get("reason", "") if isinstance(username_ban, dict) else ""
+                    delete_user_and_content(db, uid)
+                    save_db(db)
+                    session.clear()
+
+                    return (
+                        "<!doctype html><html><head><title>blocked</title>"
+                        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                        "<style>body{background:#050505;color:#fff;font-family:Arial;padding:40px}"
+                        ".box{max-width:520px;border:1px solid #333;padding:22px}</style></head>"
+                        "<body><div class='box'><h2>account blocked</h2>"
+                        "<p>this username is banned from this site.</p>"
+                        f"<p style='color:#888'>{reason}</p>"
+                        "</div></body></html>"
+                    ), 403
+    except Exception:
+        pass
+
     return None
 
 
@@ -1598,6 +1690,20 @@ def login_required(func):
             session.clear()
             flash("This email is blocked. The account was deleted.", "error")
             return redirect(url_for("home", view="register"))
+
+        try:
+            store = load_store(force=True)
+            db = store["db"]
+            username_banned, username_ban = username_is_banned(db, user.get("username", ""))
+            if username_banned:
+                uid = user.get("id") or current_user_id()
+                delete_user_and_content(db, uid)
+                save_db(db)
+                session.clear()
+                flash("This username is banned. The account was deleted.", "error")
+                return redirect(url_for("home", view="register"))
+        except Exception:
+            pass
 
         return func(*args, **kwargs)
 
@@ -3294,6 +3400,11 @@ def register():
         flash("Username must be 3-20 characters and only use letters, numbers, underscore, or dot.", "error")
         return redirect(url_for("home", view="register"))
 
+    username_banned, username_ban = username_is_banned(db, username)
+    if username_banned:
+        flash("This username is banned.", "error")
+        return redirect(url_for("home", view="register"))
+
     email_ok, email_reason = validate_email_basic(email)
     if not email_ok:
         # If an old account already exists with a blocked/temp/fake email, delete it now.
@@ -3321,6 +3432,16 @@ def register():
     existing_uid, existing_user = find_user_by_email(db, email)
 
     if existing_user:
+        existing_username_banned, existing_username_ban = username_is_banned(db, existing_user.get("username", ""))
+        if existing_username_banned:
+            try:
+                delete_user_and_content(db, existing_uid)
+                save_db(db)
+            except Exception:
+                pass
+            flash("This username is banned. The old account was deleted.", "error")
+            return redirect(url_for("home", view="register"))
+
         # Existing email opens/restores the account. Username only changes if the 5-day cooldown allows it.
         old_username_for_check = existing_user.get("username", "").strip().lower()
         wants_username_change = username.lower() != old_username_for_check
@@ -3450,6 +3571,17 @@ def login():
         flash("Account not found. Check the email or create an account first.", "error")
         return redirect(url_for("home", view="login"))
 
+    username_banned, username_ban = username_is_banned(db, user.get("username", ""))
+    if username_banned:
+        try:
+            delete_user_and_content(db, uid)
+            save_db(db)
+        except Exception:
+            pass
+        session.clear()
+        flash("This username is banned. The account was deleted.", "error")
+        return redirect(url_for("home", view="register"))
+
     if not password_matches(user.get("password_hash", ""), password):
         flash("Wrong password. Please try again.", "error")
         return redirect(url_for("home", view="login"))
@@ -3493,6 +3625,11 @@ def change_username():
 
     if not valid_username(new_username):
         flash("Username must be 3-20 characters and only use letters, numbers, underscore, or dot.", "error")
+        return go("account")
+
+    banned_new_username, new_username_ban = username_is_banned(db, new_username)
+    if banned_new_username:
+        flash("This username is banned.", "error")
         return go("account")
 
     if new_username.lower() == user.get("username", "").strip().lower():
@@ -4208,7 +4345,7 @@ def creator_ip_bans_route():
     user = current_user()
 
     if not user_is_creator(user):
-        return "Only creator can use IP bans.", 403
+        return "Only creator can use bans.", 403
 
     try:
         store = load_store(force=True)
@@ -4231,7 +4368,31 @@ def creator_ip_bans_route():
             else:
                 message = err
 
-        elif action == "ban_user":
+        elif action == "unban_ip":
+            ip = normalize_ip(request.form.get("ip", ""))
+            remove_ip_ban(db, ip)
+            save_db(db)
+            message = f"IP unbanned: {ip}"
+
+        elif action == "ban_username":
+            username = request.form.get("username", "").strip()
+            ok, err = add_username_ban(db, username, reason)
+            if ok:
+                target_uid, target_user = find_user_by_username(db, username)
+                if target_uid:
+                    delete_user_and_content(db, target_uid)
+                save_db(db)
+                message = f"Username banned: {username}"
+            else:
+                message = err
+
+        elif action == "unban_username":
+            username = request.form.get("username", "").strip()
+            remove_username_ban(db, username)
+            save_db(db)
+            message = f"Username unbanned: {username}"
+
+        elif action == "ban_user_ip":
             target = request.form.get("target", "").strip()
             target_uid = ""
             target_user = None
@@ -4243,12 +4404,7 @@ def creator_ip_bans_route():
                 target_uid, target_user = find_user_by_email(db, target)
 
             if not target_user:
-                # Also search by username.
-                for uid, u in db.get("users", {}).items():
-                    if str(u.get("username", "")).lower() == target.lower():
-                        target_uid = uid
-                        target_user = u
-                        break
+                target_uid, target_user = find_user_by_username(db, target)
 
             if not target_user:
                 message = "User not found."
@@ -4260,7 +4416,7 @@ def creator_ip_bans_route():
                     ok, err = add_ip_ban(
                         db,
                         ip,
-                        reason or f"banned user {target_user.get('username', target_uid)}",
+                        reason or f"ip ban for user {target_user.get('username', target_uid)}",
                         banned_user_id=target_uid,
                     )
                     if ok:
@@ -4269,106 +4425,177 @@ def creator_ip_bans_route():
                     else:
                         message = err
 
-        elif action == "unban_ip":
-            ip = normalize_ip(request.form.get("ip", ""))
-            remove_ip_ban(db, ip)
-            save_db(db)
-            message = f"IP unbanned: {ip}"
+        elif action == "ban_user_username":
+            target = request.form.get("target", "").strip()
+            target_uid = ""
+            target_user = None
+
+            if target in db.get("users", {}):
+                target_uid = target
+                target_user = db["users"].get(target_uid)
+            else:
+                target_uid, target_user = find_user_by_email(db, target)
+
+            if not target_user:
+                target_uid, target_user = find_user_by_username(db, target)
+
+            if not target_user:
+                message = "User not found."
+            else:
+                username = target_user.get("username", "")
+                ok, err = add_username_ban(
+                    db,
+                    username,
+                    reason or f"username ban for {username}",
+                    banned_user_id=target_uid,
+                )
+                if ok:
+                    delete_user_and_content(db, target_uid)
+                    save_db(db)
+                    message = f"Username banned and account deleted: {username}"
+                else:
+                    message = err
 
     db = normalize_db(db)
-    bans = db.get("ip_bans", {})
+    ip_bans = db.get("ip_bans", {})
+    username_bans = db.get("username_bans", {})
     users = db.get("users", {})
 
-    ban_rows = ""
-    for ip, ban in sorted(bans.items(), key=lambda x: str(x[0])):
-        reason = ban.get("reason", "") if isinstance(ban, dict) else ""
-        created = ban.get("created", "") if isinstance(ban, dict) else ""
-        banned_user_id = ban.get("banned_user_id", "") if isinstance(ban, dict) else ""
-        banned_user = users.get(banned_user_id, {}) if banned_user_id else {}
-        banned_name = banned_user.get("username", "")
+    def h(v):
+        return html.escape(str(v or ""), quote=True)
 
-        ban_rows += f"""
-        <div class="row">
-            <b>{ip}</b>
-            <small>{reason}</small>
-            <small>{banned_name}</small>
+    username_ban_rows = ""
+    for username, ban in sorted(username_bans.items(), key=lambda x: str(x[0])):
+        reason = ban.get("reason", "") if isinstance(ban, dict) else ""
+        banned_user_id = ban.get("banned_user_id", "") if isinstance(ban, dict) else ""
+        username_ban_rows += f"""
+        <div class="row3">
+            <b>{h(username)}</b>
+            <small>{h(reason)}</small>
             <form method="POST">
-                <input type="hidden" name="action" value="unban_ip">
-                <input type="hidden" name="ip" value="{ip}">
-                <button>unban</button>
+                <input type="hidden" name="action" value="unban_username">
+                <input type="hidden" name="username" value="{h(username)}">
+                <button>unban username</button>
             </form>
         </div>
         """
 
-    if not ban_rows:
-        ban_rows = "<p class='muted'>No banned IPs yet.</p>"
+    if not username_ban_rows:
+        username_ban_rows = "<p class='muted'>No banned usernames yet.</p>"
+
+    ip_ban_rows = ""
+    for ip, ban in sorted(ip_bans.items(), key=lambda x: str(x[0])):
+        reason = ban.get("reason", "") if isinstance(ban, dict) else ""
+        banned_user_id = ban.get("banned_user_id", "") if isinstance(ban, dict) else ""
+        banned_user = users.get(banned_user_id, {}) if banned_user_id else {}
+        banned_name = banned_user.get("username", "")
+
+        ip_ban_rows += f"""
+        <div class="row4">
+            <b>{h(ip)}</b>
+            <small>{h(reason)}</small>
+            <small>{h(banned_name)}</small>
+            <form method="POST">
+                <input type="hidden" name="action" value="unban_ip">
+                <input type="hidden" name="ip" value="{h(ip)}">
+                <button>unban ip</button>
+            </form>
+        </div>
+        """
+
+    if not ip_ban_rows:
+        ip_ban_rows = "<p class='muted'>No banned IPs yet.</p>"
 
     recent_users = ""
-    for uid, u in sorted(users.items(), key=lambda x: int(x[1].get("last_ip_at", 0) or 0), reverse=True)[:80]:
+    for uid, u in sorted(users.items(), key=lambda x: int(x[1].get("last_ip_at", 0) or 0), reverse=True)[:100]:
         username = u.get("username", "")
         email = u.get("email", "")
         ip = u.get("last_ip", "")
-        if not ip:
-            continue
 
         recent_users += f"""
-        <div class="row">
-            <b>{username}</b>
-            <small>{email}</small>
-            <small>{ip}</small>
+        <div class="userrow">
+            <div>
+                <b>{h(username)}</b><br>
+                <small>{h(email)}</small><br>
+                <small>{h(ip or 'no ip yet')}</small>
+            </div>
             <form method="POST">
-                <input type="hidden" name="action" value="ban_user">
-                <input type="hidden" name="target" value="{uid}">
-                <input name="reason" placeholder="reason" value="creator ban">
+                <input type="hidden" name="action" value="ban_user_username">
+                <input type="hidden" name="target" value="{h(uid)}">
+                <input name="reason" placeholder="reason" value="creator username ban">
+                <button>ban username</button>
+            </form>
+            <form method="POST">
+                <input type="hidden" name="action" value="ban_user_ip">
+                <input type="hidden" name="target" value="{h(uid)}">
+                <input name="reason" placeholder="reason" value="creator ip ban">
                 <button>ban ip</button>
             </form>
         </div>
         """
 
     if not recent_users:
-        recent_users = "<p class='muted'>No user IPs saved yet. Users need to login once after this update.</p>"
+        recent_users = "<p class='muted'>No users found.</p>"
 
     return f"""
     <!doctype html>
     <html>
     <head>
-        <title>creator ip bans</title>
+        <title>creator bans</title>
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <style>
             body{{background:#070707;color:#f5f5f5;font-family:Arial;margin:0;padding:24px}}
             a{{color:#7ee7ff}}
             input,button{{background:#111;color:white;border:1px solid #444;padding:10px;margin:4px}}
             button{{cursor:pointer;font-weight:800}}
-            .box{{max-width:900px;margin:auto}}
+            .box{{max-width:1050px;margin:auto}}
             .panel{{border:1px solid #333;padding:16px;margin:16px 0;background:#0c0c0c}}
-            .row{{display:grid;grid-template-columns:1.3fr 1.7fr 1fr 1.5fr;gap:8px;align-items:center;border-top:1px solid #222;padding:10px 0}}
+            .row3{{display:grid;grid-template-columns:1fr 2fr 1fr;gap:8px;align-items:center;border-top:1px solid #222;padding:10px 0}}
+            .row4{{display:grid;grid-template-columns:1.2fr 1.7fr 1fr 1fr;gap:8px;align-items:center;border-top:1px solid #222;padding:10px 0}}
+            .userrow{{display:grid;grid-template-columns:1.4fr 1.2fr 1.2fr;gap:8px;align-items:center;border-top:1px solid #222;padding:10px 0}}
             small,.muted{{color:#999}}
-            @media(max-width:800px){{.row{{grid-template-columns:1fr}}}}
+            @media(max-width:850px){{.row3,.row4,.userrow{{grid-template-columns:1fr}}}}
         </style>
     </head>
     <body>
         <div class="box">
-            <h1>creator ip bans</h1>
+            <h1>creator bans</h1>
             <p><a href="/">back to site</a></p>
-            <p style="color:#7ee7ff">{message}</p>
+            <p style="color:#7ee7ff">{h(message)}</p>
 
             <div class="panel">
-                <h2>ban ip manually</h2>
+                <h2>ban username input</h2>
+                <form method="POST">
+                    <input type="hidden" name="action" value="ban_username">
+                    <input name="username" placeholder="username" required>
+                    <input name="reason" placeholder="reason" value="creator username ban">
+                    <button>ban username</button>
+                </form>
+                <p class="muted">This blocks the username and deletes the existing account if it exists.</p>
+            </div>
+
+            <div class="panel">
+                <h2>ip ban input</h2>
                 <form method="POST">
                     <input type="hidden" name="action" value="ban_ip">
                     <input name="ip" placeholder="IP address" required>
-                    <input name="reason" placeholder="reason" value="creator ban">
+                    <input name="reason" placeholder="reason" value="creator ip ban">
                     <button>ban ip</button>
                 </form>
             </div>
 
             <div class="panel">
-                <h2>banned ips</h2>
-                {ban_rows}
+                <h2>banned usernames</h2>
+                {username_ban_rows}
             </div>
 
             <div class="panel">
-                <h2>recent user ips</h2>
+                <h2>banned ips</h2>
+                {ip_ban_rows}
+            </div>
+
+            <div class="panel">
+                <h2>recent users</h2>
                 {recent_users}
             </div>
         </div>
