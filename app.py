@@ -1800,8 +1800,22 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 .audio-controls .audio-btn:hover{background:transparent!important;border:none!important;color:var(--blue)}
 .audio-range{flex:1;height:3px;padding:0;cursor:pointer;accent-color:var(--blue);background:transparent;border:none}
 .audio-time{min-width:82px;text-align:right;color:var(--muted);font-size:12px;font-weight:900}
-.file-preview-img{display:block;max-width:360px;max-height:260px;object-fit:contain;margin:14px 0;border:1px solid var(--line);background:rgba(255,255,255,.03)}
+.file-preview-img{display:block;max-width:360px;max-height:260px;object-fit:contain;margin:14px 0;border:1px solid var(--line);background:rgba(255,255,255,.03);cursor:zoom-in;transition:opacity .12s ease,transform .12s ease}
+.file-preview-img:hover{opacity:.88;transform:scale(1.01)}
 .file-preview-img.big{max-width:720px;max-height:520px}
+.image-lightbox{
+    position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.88);
+    display:none;align-items:center;justify-content:center;padding:28px;cursor:zoom-out;
+}
+.image-lightbox.show{display:flex}
+.image-lightbox img{
+    max-width:96vw;max-height:94vh;object-fit:contain;border:1px solid rgba(255,255,255,.18);
+    background:rgba(0,0,0,.25);cursor:default;
+}
+.image-lightbox-close{
+    position:fixed;top:18px;right:22px;color:white;font-size:32px;font-weight:900;
+    cursor:pointer;line-height:1;background:rgba(0,0,0,.25);padding:4px 12px;
+}
 .live-dot{display:inline-block;width:7px;height:7px;background:var(--good);margin-left:8px}
 .login-only{height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}
 .login-shell{width:390px;background:transparent;border-left:1px solid var(--line);border-right:1px solid var(--line);padding:32px}
@@ -1944,6 +1958,11 @@ button.login-btn.primary-btn{background:white;color:#06101d;border-color:white}
 
 {% endif %}
 
+<div id="imageLightbox" class="image-lightbox" onclick="closeImageLightbox(event)">
+    <div class="image-lightbox-close" onclick="closeImageLightbox(event)">×</div>
+    <img id="imageLightboxImg" src="" alt="full image" onclick="event.stopPropagation()">
+</div>
+
 <script>
 let files = {{ files|tojson }};
 const credits = {{ credits|tojson }};
@@ -1976,6 +1995,34 @@ function clickEffect(el){ if(!el) return; }
 document.addEventListener("click", function(e){
     const target = e.target.closest("button, .file-button, .item, .fake-link, .topic-open, .name-link");
     if(target) clickEffect(target);
+});
+
+function openImageLightbox(url){
+    const box = document.getElementById("imageLightbox");
+    const img = document.getElementById("imageLightboxImg");
+    if(!box || !img || !url) return;
+
+    img.src = url;
+    box.classList.add("show");
+    document.body.style.overflow = "hidden";
+}
+
+function closeImageLightbox(event){
+    if(event) event.stopPropagation();
+
+    const box = document.getElementById("imageLightbox");
+    const img = document.getElementById("imageLightboxImg");
+    if(!box || !img) return;
+
+    box.classList.remove("show");
+    img.src = "";
+    document.body.style.overflow = "";
+}
+
+document.addEventListener("keydown", function(e){
+    if(e.key === "Escape"){
+        closeImageLightbox(e);
+    }
 });
 
 function fadeChange(html){
@@ -2075,7 +2122,7 @@ function audioPlayerHtml(file){
 function filePreviewHtml(file, big=false){
     if(!file.is_image) return "";
     const cls = big ? "file-preview-img big" : "file-preview-img";
-    return `<img class="${cls}" src="${escapeAttr(file.preview_url)}" alt="${escapeAttr(file.name)}">`;
+    return `<img class="${cls}" src="${escapeAttr(file.preview_url)}" alt="${escapeAttr(file.name)}" onclick="openImageLightbox('${escapeAttr(file.preview_url)}')">`;
 }
 
 function bindAudioPlayers(){
